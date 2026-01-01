@@ -13,7 +13,7 @@ class RAGChain:
     def __init__(
         self,
         vectorstore,
-        model: str = "gpt-3.5-turbo",
+        model: str = "gpt-4o-mini",
         top_k: int = 3,
     ):
         if not os.getenv("OPENAI_API_KEY"):
@@ -22,11 +22,12 @@ class RAGChain:
         self.vectorstore = vectorstore
         self.top_k = top_k
 
-        # OpenAI client (без proxy)
+        # OpenAI client (without proxy)
         self.client = OpenAI(
             http_client=httpx.Client(trust_env=False)
         )
-        self.model = model
+        self.model = os.getenv("MODEL_NAME", model)
+        self.temperature = float(os.getenv("TEMPERATURE", 0))
 
     def _build_context(self, docs: List[Document]) -> str:
         """
@@ -80,11 +81,10 @@ Answer:
         # 4. Generate
         response = self.client.chat.completions.create(
             model=self.model,
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=self.temperature,
         )
+
 
         answer = response.choices[0].message.content.strip()
 
