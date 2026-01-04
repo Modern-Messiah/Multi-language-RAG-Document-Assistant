@@ -54,6 +54,16 @@ with st.sidebar:
         accept_multiple_files=True
     )
 
+    st.divider()
+
+    st.header("⚙️ Settings")
+
+    language = st.radio(
+        "Answer language",
+        ["Auto", "English", "Русский"],
+        index=0
+    )
+
     if uploaded_files:
         for file in uploaded_files:
             with st.spinner(f"Processing {file.name}..."):
@@ -85,9 +95,13 @@ if ask_btn:
     else:
         with st.spinner("Thinking..."):
             response = requests.post(
-                f"{API_URL}/query",
-                json={"question": question}
-            )
+            f"{API_URL}/query",
+            json={
+                "question": question,
+                "language": language
+            }
+        )
+
 
         if response.status_code != 200:
             st.error(response.text)

@@ -76,6 +76,8 @@ async def query_rag(request: QueryRequest):
             detail="No documents uploaded yet"
         )
 
-    return rag_chain.ask(request.question)
-
+    return rag_chain.ask(
+        question=request.question,
+        language=request.language
+    )
 

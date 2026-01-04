@@ -64,66 +64,76 @@ class RAGChain:
     # =========================
     # Main RAG method
     # =========================
-    def ask(self, question: str) -> Dict:
-        # 1️⃣ Retrieve relevant documents
+    def ask(self, question: str, language: str = "Auto") -> Dict:
         docs = self.vectorstore.similarity_search(
             question, k=self.top_k
         )
 
         if not docs:
             return {
-                "answer": "I don't know.",
+                "answer": "No relevant information found.",
                 "sources": []
             }
 
-        # 2️⃣ Build context
         context = self._build_context(docs)
 
-        # 3️⃣ User prompt (без правил!)
-        prompt = f"""
-Context:
-{context}
+        if language == "English":
+            lang_rule = "Answer strictly in English."
+        elif language == "Русский":
+            lang_rule = "Отвечай строго на русском языке."
+        else:
+            lang_rule = (
+                "Answer in the same language as the user's question. "
+                "If context is English and question is Russian, translate."
+            )
 
-Question:
-{question}
+        system_prompt = f"""
+    You are a professional RAG assistant.
 
-Answer:
-"""
+    Rules:
+    - Use ONLY the provided context
+    - Do NOT hallucinate
+    - Cite sources using [number]
+    - {lang_rule}
+    """
 
-        # 4 Generate answer
+        user_prompt = f"""
+    Context:
+    {context}
+
+    Question:
+    {question}
+
+    Answer:
+    """
+
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
             ],
             temperature=self.temperature,
         )
 
         answer = response.choices[0].message.content.strip()
 
-        # 5 Collect unique sources (без дублей)
         sources = []
-        seen_sources = set()
-        source_id = 1
+        seen = set()
+        sid = 1
 
         for doc in docs:
-            source = doc.metadata.get("source", "unknown")
-
-            if source in seen_sources:
+            src = doc.metadata.get("source", "unknown")
+            if src in seen:
                 continue
-
-            seen_sources.add(source)
-
+            seen.add(src)
             sources.append({
-                "id": source_id,
-                "source": source,
+                "id": sid,
+                "source": src,
                 "preview": doc.page_content[:200]
             })
+            sid += 1
 
-            source_id += 1
-
-        # 6 Final response
         return {
             "answer": answer,
             "sources": sources
