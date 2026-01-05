@@ -8,6 +8,15 @@ from openai import OpenAI
 import httpx
 import os
 
+LANG_RULES = {
+    "English": "Answer strictly in English.",
+    "Русский": "Отвечай строго на русском языке.",
+    "Français": "Réponds strictement en français.",
+    "Deutsch": "Antworte ausschließlich auf Deutsch.",
+    "Español": "Responde estrictamente en español.",
+    "中文": "请严格使用简体中文回答。"
+}
+
 
 # =========================
 # System Prompt
@@ -77,15 +86,14 @@ class RAGChain:
 
         context = self._build_context(docs)
 
-        if language == "English":
-            lang_rule = "Answer strictly in English."
-        elif language == "Русский":
-            lang_rule = "Отвечай строго на русском языке."
-        else:
+        if language == "Auto":
             lang_rule = (
                 "Answer in the same language as the user's question. "
-                "If context is English and question is Russian, translate."
+                "If the context is in another language, translate the answer."
             )
+        else:
+            lang_rule = LANG_RULES.get(language, "")
+
 
         system_prompt = f"""
     You are a professional RAG assistant.

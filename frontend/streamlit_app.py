@@ -93,7 +93,6 @@ input[type="text"] {
 st.title("📄 RAG Assistant")
 st.caption(
     "Upload your documents and ask questions based **only on their content** "
-    "(Retrieval-Augmented Generation)"
 )
 
 st.markdown("<hr>", unsafe_allow_html=True)
@@ -128,10 +127,19 @@ with st.sidebar:
     st.header("⚙️ Settings")
 
     language = st.radio(
-        "Answer language",
-        ["Auto", "English", "Русский"],
-        index=0
+    "Answer language",
+    [
+        "Auto",
+        "English",
+        "Русский",
+        "Français",
+        "Deutsch",
+        "Español",
+        "中文"
+    ],
+    index=0
     )
+
 
     st.divider()
 
@@ -156,7 +164,7 @@ else:
 st.subheader("💬 Ask a question")
 
 question = st.text_input(
-    "Type your question (English or Russian)",
+    "Type your question",
     placeholder="What is RAG?"
 )
 
