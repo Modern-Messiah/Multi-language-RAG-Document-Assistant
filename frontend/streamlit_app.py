@@ -47,22 +47,9 @@ input, textarea, button {
     font-size: 20px;
 }
 
-/* Small text */
-small {
-    color: #94a3b8;
-    font-size: 20px;
-}
-
 /* Sidebar text */
 section[data-testid="stSidebar"] * {
     font-size: 20px;
-}
-
-/* Divider */
-hr {
-    border: none;
-    border-top: 1px solid #1e293b;
-    margin: 24px 0;
 }
 
 /* Caption under title */
@@ -71,21 +58,8 @@ hr {
     line-height: 1.6;
     color: #cbd5f5;
 }
-
-/* Input labels (e.g. "Type your question") */
-label p {
-    font-size: 20px !important;
-    font-weight: 500;
-}
-
-/* Text input itself */
-input[type="text"] {
-    font-size: 20px !important;
-}
-
 </style>
 """, unsafe_allow_html=True)
-
 
 # =========================
 # Header
@@ -126,22 +100,29 @@ with st.sidebar:
 
     st.header("⚙️ Settings")
 
-    language = st.radio(
-    "Answer language",
-    [
-        "Auto",
-        "English",
-        "Русский",
-        "Қазақша",
-        "Français",
-        "Deutsch",
-        "Español",
-        "日本語",
-        "中文"
-    ],
-    index=0
+    # =========================
+    # Language selector (label → value)
+    # =========================
+    LANG_OPTIONS = {
+        "Auto 🌐": "Auto",
+        "English 🇬🇧": "English",
+        "Русский 🇷🇺": "Русский",
+        "Қазақша 🇰🇿": "Қазақша",
+        "Français 🇫🇷": "Français",
+        "Deutsch 🇩🇪": "Deutsch",
+        "Español 🇪🇸": "Español",
+        "日本語 🇯🇵": "日本語",
+        "中文 🇨🇳": "中文",
+    }
+
+    language_label = st.radio(
+        "Answer language",
+        list(LANG_OPTIONS.keys()),
+        index=0
     )
 
+    # value WITHOUT emoji → backend-safe
+    language = LANG_OPTIONS[language_label]
 
     st.divider()
 
@@ -189,7 +170,7 @@ if ask_btn:
             f"{API_URL}/query",
             json={
                 "question": question,
-                "language": language
+                "language": language  # ✅ clean value
             }
         )
 
@@ -224,5 +205,4 @@ if ask_btn:
                     """,
                     unsafe_allow_html=True
                 )
-
 

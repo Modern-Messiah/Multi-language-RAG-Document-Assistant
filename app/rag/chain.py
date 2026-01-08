@@ -9,6 +9,7 @@ import httpx
 import os
 import re
 
+
 # =========================
 # Language rules
 # =========================
@@ -25,7 +26,7 @@ LANG_RULES = {
 
 
 # =========================
-# System prompt (base)
+# Base system prompt
 # =========================
 SYSTEM_PROMPT = """
 You are a professional Retrieval-Augmented Generation (RAG) assistant.
@@ -60,21 +61,17 @@ class RAGChain:
         self.temperature = float(os.getenv("TEMPERATURE", 0))
 
     # =========================
-    # Build context from docs
+    # Build context
     # =========================
     def _build_context(self, docs: List[Document]) -> str:
-        context_parts = []
-
+        parts = []
         for doc in docs:
             source = doc.metadata.get("source", "unknown")
-            context_parts.append(
-                f"Source: {source}\n{doc.page_content}"
-            )
-
-        return "\n\n".join(context_parts)
+            parts.append(f"Source: {source}\n{doc.page_content}")
+        return "\n\n".join(parts)
 
     # =========================
-    # Remove [1], [2], etc.
+    # Strip [1], [2], etc.
     # =========================
     def _strip_citations(self, text: str) -> str:
         return re.sub(r"\[\d+\]", "", text).strip()
@@ -101,7 +98,10 @@ class RAGChain:
                 "If the context is in another language, translate the answer."
             )
         else:
-            lang_rule = LANG_RULES.get(language, "")
+            lang_rule = LANG_RULES.get(
+                language,
+                "Answer in the same language as the user's question."
+            )
 
         system_prompt = f"""
 {SYSTEM_PROMPT}
