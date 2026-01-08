@@ -13,50 +13,86 @@ st.set_page_config(
 )
 
 # =========================
-# Custom CSS
+# Custom CSS (Desktop + Mobile)
 # =========================
 st.markdown("""
 <style>
-/* Global text size */
-html, body, [class*="css"] {
+/* =====================
+   BASE (desktop)
+===================== */
+html, body {
     font-size: 20px;
 }
 
-/* Inputs & buttons */
 input, textarea, button {
     font-size: 20px !important;
 }
 
-/* Answer box */
 .answer-box {
     background-color: #0f172a;
     padding: 22px;
     border-radius: 12px;
     border: 1px solid #334155;
-    font-size: 20px;
     line-height: 1.65;
 }
 
-/* Source cards */
 .source-box {
     background-color: #020617;
     padding: 14px;
     border-radius: 8px;
     border-left: 4px solid #38bdf8;
     margin-bottom: 12px;
-    font-size: 20px;
 }
 
-/* Sidebar text */
 section[data-testid="stSidebar"] * {
     font-size: 20px;
 }
 
-/* Caption under title */
 [data-testid="stCaptionContainer"] p {
-    font-size: 20px !important;
+    font-size: 20px;
     line-height: 1.6;
     color: #cbd5f5;
+}
+
+/* =====================
+   MOBILE ADAPTATION
+===================== */
+@media (max-width: 768px) {
+
+    html, body {
+        font-size: 16px;
+    }
+
+    input, textarea, button {
+        font-size: 16px !important;
+        width: 100%;
+    }
+
+    .answer-box {
+        padding: 16px;
+        font-size: 16px;
+    }
+
+    .source-box {
+        padding: 12px;
+        font-size: 15px;
+    }
+
+    section[data-testid="stSidebar"] {
+        width: 100% !important;
+    }
+
+    h1 {
+        font-size: 24px !important;
+    }
+
+    h2, h3 {
+        font-size: 20px !important;
+    }
+
+    button {
+        width: 100%;
+    }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -66,9 +102,8 @@ section[data-testid="stSidebar"] * {
 # =========================
 st.title("📄 RAG Assistant")
 st.caption(
-    "Upload your documents and ask questions based **only on their content** "
+    "Upload your documents and ask questions based **only on their content**"
 )
-
 st.markdown("<hr>", unsafe_allow_html=True)
 
 # =========================
@@ -100,9 +135,6 @@ with st.sidebar:
 
     st.header("⚙️ Settings")
 
-    # =========================
-    # Language selector (label → value)
-    # =========================
     LANG_OPTIONS = {
         "Auto 🌐": "Auto",
         "English 🇬🇧": "English",
@@ -120,8 +152,6 @@ with st.sidebar:
         list(LANG_OPTIONS.keys()),
         index=0
     )
-
-    # value WITHOUT emoji → backend-safe
     language = LANG_OPTIONS[language_label]
 
     st.divider()
@@ -170,7 +200,7 @@ if ask_btn:
             f"{API_URL}/query",
             json={
                 "question": question,
-                "language": language  # ✅ clean value
+                "language": language
             }
         )
 
@@ -179,18 +209,12 @@ if ask_btn:
     else:
         data = response.json()
 
-        # =========================
-        # Answer
-        # =========================
         st.subheader("🧠 Answer")
         st.markdown(
             f"<div class='answer-box'>{data['answer']}</div>",
             unsafe_allow_html=True
         )
 
-        # =========================
-        # Sources
-        # =========================
         if data.get("sources"):
             st.subheader("📚 Sources")
             st.caption("Sources used to generate the answer")
@@ -205,4 +229,3 @@ if ask_btn:
                     """,
                     unsafe_allow_html=True
                 )
-
