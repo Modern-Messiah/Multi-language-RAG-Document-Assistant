@@ -46,6 +46,16 @@ input, textarea, button {
 
 section[data-testid="stSidebar"] * {
     font-size: 20px;
+    section[data-testid="stFileUploader"] small {
+    opacity: 0.25 !important;
+    font-size: 11px !important;
+    pointer-events: none;
+}
+
+section[data-testid="stFileUploader"] small {
+    display: none !important;
+}
+
 }
 
 [data-testid="stCaptionContainer"] p {
@@ -93,6 +103,7 @@ section[data-testid="stSidebar"] * {
     button {
         width: 100%;
     }
+
 }
 </style>
 """, unsafe_allow_html=True)
@@ -113,7 +124,7 @@ with st.sidebar:
     st.header("📎 Upload documents")
 
     uploaded_files = st.file_uploader(
-        "TXT or PDF files",
+        "TXT or PDF files (max 30 MB per file)",
         type=["txt", "pdf"],
         accept_multiple_files=True
     )
@@ -159,7 +170,7 @@ with st.sidebar:
     st.info(
         "📌 **Limits**\n\n"
         "- Any number of documents\n"
-        "- Up to **200 MB per file**\n"
+        "- Up to **30 MB per file**\n"
         "- Supported formats: **TXT, PDF**"
     )
 

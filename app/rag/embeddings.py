@@ -23,12 +23,26 @@ class OpenAIEmbeddingFunction:
         )
         self.model = model
 
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        response = self.client.embeddings.create(
-            model=self.model,
-            input=texts,
-        )
-        return [item.embedding for item in response.data]
+    def embed_documents(
+        self,
+        texts: List[str],
+        batch_size: int = 100
+    ) -> List[List[float]]:
+        all_embeddings: List[List[float]] = []
+
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+
+            response = self.client.embeddings.create(
+                model=self.model,
+                input=batch,
+            )
+
+            all_embeddings.extend(
+                [item.embedding for item in response.data]
+            )
+
+        return all_embeddings
 
     def embed_query(self, text: str) -> List[float]:
         response = self.client.embeddings.create(
@@ -36,6 +50,7 @@ class OpenAIEmbeddingFunction:
             input=[text],
         )
         return response.data[0].embedding
+
 
 
 class EmbeddingsManager:
