@@ -1,0 +1,52 @@
+services:
+  backend:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    volumes:
+      - .:/app
+      - data_uploads:/app/data/uploads
+      - data_chroma:/app/data/chroma_db
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    networks:
+      - rag_net
+
+  frontend:
+    build: .
+    command: streamlit run frontend/streamlit_app.py --server.port 8501 --server.address 0.0.0.0
+    volumes:
+      - .:/app
+    environment:
+      - BACKEND_URL=http://backend:8000
+    env_file:
+      - .env
+    ports:
+      - "8501:8501"
+    depends_on:
+      - backend
+    networks:
+      - rag_net
+
+  bot:
+    build: .
+    command: python telegram/bot.py
+    volumes:
+      - .:/app
+    environment:
+      - BACKEND_URL=http://backend:8000
+    env_file:
+      - .env
+    depends_on:
+      - backend
+    networks:
+      - rag_net
+
+networks:
+  rag_net:
+    driver: bridge
+
+volumes:
+  data_uploads:
+  data_chroma:

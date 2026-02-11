@@ -228,7 +228,7 @@ sample_*.txt
 
 # Model cache
 .cache/
-models/
+# models/
 
 # LangChain cache
 .langchain/

@@ -41,13 +41,11 @@ def get_language_keyboard():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send a message when the command /start is issued."""
     user = update.effective_user
-    context.user_data["language"] = "Auto"
     
     await update.message.reply_html(
         rf"Hi {user.mention_html()}! I am your RAG Document Assistant bot. "
-        "\n\n1. Upload a <b>PDF</b> or <b>TXT</b> file."
-        "\n2. Ask me questions about the content."
-        "\n\nYou can also select your preferred answer language below:",
+        "\n\n<b>Please select your preferred answer language to continue:</b>"
+        "\n\n<i>Use /clear to reset your documents.</i>",
         reply_markup=get_language_keyboard()
     )
 
@@ -58,9 +56,27 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1. Attach a PDF or TXT file and I will index it.\n"
         "2. Send any text message to ask questions about your documents.\n"
         "3. Select a language from the keyboard to set the response language.\n"
-        "4. Use /start to reset conversation."
+        "4. Use /clear to delete your uploaded documents.\n"
+        "5. Use /start to reset conversation."
     )
     await update.message.reply_text(help_text)
+
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Clear user documents."""
+    user_id = str(update.effective_user.id)
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{BACKEND_URL}/clear", 
+                params={"user_id": user_id}
+            )
+            if response.status_code == 200:
+                await update.message.reply_text("✅ All your documents have been cleared!")
+            else:
+                await update.message.reply_text("❌ Failed to clear documents.")
+    except Exception as e:
+        logger.error(f"Error in clear command: {e}")
+        await update.message.reply_text("❌ An error occurred.")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle uploaded documents."""
@@ -81,12 +97,17 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Upload to FastAPI backend
         async with httpx.AsyncClient(timeout=60.0) as client:
             files = {'file': (file_name, bytes(file_bytes))}
-            response = await client.post(f"{BACKEND_URL}/upload", files=files)
+            params = {'user_id': str(update.effective_user.id)}
+            response = await client.post(
+                f"{BACKEND_URL}/upload", 
+                files=files, 
+                params=params
+            )
             
             if response.status_code == 200:
                 data = response.json()
                 await status_msg.edit_text(
-                    f"✅ Document processed successfully!\nChunks created: {data.get('chunks')}"
+                    f"✅ Document processed successfully!"
                 )
             else:
                 detail = response.json().get('detail', 'Unknown error')
@@ -103,7 +124,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check if this is a language selection
     if text in LANGUAGES:
         context.user_data["language"] = text
-        await update.message.reply_text(f"Language set to: {text}")
+        await update.message.reply_text(
+            f"✅ Language set to: {text}\n\n"
+            "<b>Now, what would you like to do?</b>\n"
+            "1. 📄 Attach a <b>PDF</b> or <b>TXT</b> file to index it.\n"
+            "2. 💬 Ask me questions about your documents.\n\n"
+            "You can change the language at any time by clicking the buttons below.",
+            parse_mode='HTML'
+        )
         return
 
     # Treat as query
@@ -113,7 +141,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with httpx.AsyncClient(timeout=60.0) as client:
             payload = {
                 "question": text,
-                "language": language
+                "language": language,
+                "user_id": str(update.effective_user.id)
             }
             response = await client.post(f"{BACKEND_URL}/query", json=payload)
             
@@ -149,6 +178,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("clear", clear_command))
     
     # Handle documents
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))

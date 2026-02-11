@@ -217,6 +217,32 @@ class EmbeddingsManager:
         except Exception as e:
             logger.error(f"❌ Error adding documents: {str(e)}")
             raise
+
+    def delete_documents(self, filter: dict):
+        """
+        Delete documents from vectorstore by filter
+        
+        Args:
+            filter: Metadata filter (e.g. {"user_id": "123"})
+        """
+        if not self.vectorstore:
+            return
+
+        try:
+            logger.info(f"🔄 Fetching document IDs with filter: {filter}")
+            # Use the underlying collection to get IDs matching the filter
+            results = self.vectorstore._collection.get(where=filter)
+            ids = results.get("ids", [])
+            
+            if ids:
+                logger.info(f"🗑️ Deleting {len(ids)} documents...")
+                self.vectorstore.delete(ids=ids)
+                logger.info("✅ Documents deleted")
+            else:
+                logger.info("ℹ️ No documents found for this filter")
+        except Exception as e:
+            logger.error(f"❌ Error deleting documents: {str(e)}")
+            raise
     
     def similarity_search(
         self,

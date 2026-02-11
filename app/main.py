@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from dotenv import load_dotenv
 import os
+from typing import List, Optional
 
 from app.rag.document_loader import DocumentLoader
 from app.rag.text_splitter import TextChunker
@@ -44,7 +45,10 @@ embeddings = EmbeddingsManager(persist_directory=VECTOR_DIR)
 # Upload endpoint
 # =========================
 @app.post("/upload")
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(
+    file: UploadFile = File(...),
+    user_id: Optional[str] = None
+):
     global vectorstore, rag_chain
 
     if not file.filename.lower().endswith((".txt", ".pdf")):
@@ -77,6 +81,11 @@ async def upload_document(file: UploadFile = File(...)):
     docs = loader.load_document(file_path)
     chunks = chunker.split_documents(docs)
 
+    # 🏷 Add user_id to metadata for isolation
+    if user_id:
+        for chunk in chunks:
+            chunk.metadata["user_id"] = user_id
+
     # 📦 Vectorstore logic
     try:
         vectorstore = embeddings.load_vectorstore(COLLECTION_NAME)
@@ -102,11 +111,18 @@ async def upload_document(file: UploadFile = File(...)):
         "chunks": len(chunks)
     }
 
-# =========================
-# Query endpoint
-# =========================
 @app.post("/query", response_model=QueryResponse)
 async def query_rag(request: QueryRequest):
+    global rag_chain, vectorstore
+    
+    # Lazy initial load if not done yet
+    if vectorstore is None:
+        try:
+            vectorstore = embeddings.load_vectorstore(COLLECTION_NAME)
+            rag_chain = RAGChain(vectorstore)
+        except Exception:
+            pass
+
     if rag_chain is None:
         raise HTTPException(
             status_code=400,
@@ -115,5 +131,26 @@ async def query_rag(request: QueryRequest):
 
     return rag_chain.ask(
         question=request.question,
-        language=request.language
+        language=request.language,
+        user_id=request.user_id
     )
+
+@app.post("/clear")
+async def clear_documents(user_id: Optional[str] = None):
+    global vectorstore, rag_chain
+    try:
+        if vectorstore is None:
+            try:
+                vectorstore = embeddings.load_vectorstore(COLLECTION_NAME)
+            except Exception:
+                return {"message": "Nothing to clear"}
+
+        if user_id:
+            embeddings.delete_documents(filter={"user_id": user_id})
+        else:
+            embeddings.delete_documents(filter={"user_id": "streamlit_user"})
+
+        return {"message": "Documents cleared successfully"}
+    except Exception as e:
+        logger.error(f"Error clearing documents: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

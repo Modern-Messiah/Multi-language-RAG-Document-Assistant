@@ -1,7 +1,8 @@
 import streamlit as st
 import requests
+import os
 
-API_URL = "http://127.0.0.1:8000"
+API_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
 
 # =========================
 # Page config
@@ -134,7 +135,8 @@ with st.sidebar:
             with st.spinner(f"Processing {file.name}..."):
                 response = requests.post(
                     f"{API_URL}/upload",
-                    files={"file": file}
+                    files={"file": file},
+                    params={"user_id": "streamlit_user"}
                 )
 
             if response.status_code == 200:
@@ -166,6 +168,15 @@ with st.sidebar:
     language = LANG_OPTIONS[language_label]
 
     st.divider()
+
+    if st.button("🗑️ Clear all documents", use_container_width=True):
+        try:
+            resp = requests.post(f"{API_URL}/clear", params={"user_id": "streamlit_user"})
+            if resp.status_code == 200:
+                st.success("Cleared!")
+                st.rerun()
+        except Exception as e:
+            st.error(f"Error: {e}")
 
     st.info(
         "📌 **Limits**\n\n"
@@ -211,7 +222,8 @@ if ask_btn:
             f"{API_URL}/query",
             json={
                 "question": question,
-                "language": language
+                "language": language,
+                "user_id": "streamlit_user"
             }
         )
 
@@ -231,12 +243,6 @@ if ask_btn:
             st.caption("Sources used to generate the answer")
 
             for src in data["sources"]:
-                st.markdown(
-                    f"""
-                    <div class="source-box">
-                        <b>{src['source']}</b><br>
-                        <small>{src['preview']}</small>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
+                # Use st.expander or safe rendering for sources to avoid InvalidCharacterError
+                with st.expander(f"📍 {src['source']}"):
+                    st.write(src['preview'])

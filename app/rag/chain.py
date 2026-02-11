@@ -45,13 +45,13 @@ class RAGChain:
         self,
         vectorstore,
         model: str = "gpt-4o-mini",
-        top_k: int = 3,
+        top_k: int = 5,
     ):
         if not os.getenv("OPENAI_API_KEY"):
             raise ValueError("OPENAI_API_KEY not found")
 
         self.vectorstore = vectorstore
-        self.top_k = top_k
+        self.top_k = int(os.getenv("TOP_K_RESULTS", top_k))
 
         self.client = OpenAI(
             http_client=httpx.Client(trust_env=False)
@@ -79,9 +79,11 @@ class RAGChain:
     # =========================
     # Main RAG method
     # =========================
-    def ask(self, question: str, language: str = "Auto") -> Dict:
+    def ask(self, question: str, language: str = "Auto", user_id: str = None) -> Dict:
+        filter_dict = {"user_id": user_id} if user_id else None
+        
         docs = self.vectorstore.similarity_search(
-            question, k=self.top_k
+            question, k=self.top_k, filter=filter_dict
         )
 
         if not docs:
