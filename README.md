@@ -1,10 +1,43 @@
-A production-ready, multi-language Retrieval-Augmented Generation (RAG) assistant
-designed for querying multiple documents with accurate source attribution.
+# 🤖 Multi-language RAG Document Assistant
 
-The system supports PDF/TXT uploads, multilingual questions and answers
-(English, Russian, French, German, Spanish, Kazakh, Japanese, Chinese),
-semantic search powered by ChromaDB, and strict language-aware answer generation.
+A production-ready, multi-language **Retrieval-Augmented Generation (RAG)** assistant designed for querying multiple documents with accurate source attribution.
 
-Built with a modular FastAPI backend and a responsive Streamlit web interface.
-Designed as a SaaS-ready architecture with support for additional clients,
-including a planned Telegram bot integration.
+## ✨ Key Features
+
+- **📄 Multi-document Support**: Efficiently handles PDF and TXT file uploads.
+- **🌍 Multilingual Intelligence**: Supports questions and answers in English, Russian, Kazakh, French, German, Spanish, Chinese, and Japanese.
+- **🔍 Semantic Search**: Powered by **ChromaDB** for fast and relevant document retrieval.
+- **🎯 Accurate Attribution**: Every answer comes with citations and text previews from the source documents.
+- **💻 Multiple Interfaces**:
+  - **FastAPI Backend**: Robust and scalable API.
+  - **Streamlit Web UI**: Responsive and user-friendly interface.
+  - **Telegram Bot**: Query your documents on the go.
+- **🐳 Dockerized**: Easy deployment using Docker and Docker Compose.
+
+## 🏗 Architecture Overview
+
+The system follows a modular architecture:
+- **Frontend**: Streamlit application for web-based interaction.
+- **Bot**: Python-based Telegram bot implementation.
+- **Backend**: FastAPI server orchestrating the RAG pipeline.
+- **RAG Core**: Custom document loading, chunking, and retrieval logic using LangChain-like patterns.
+- **Storage**: ChromaDB for vector embeddings and local filesystem for raw uploads.
+
+## 🚀 Quick Start
+
+1. **Clone & Set up Environment**:
+   ```bash
+   git clone <repo-url>
+   cp .env.template .env # Fill in your OPENAI_API_KEY
+   ```
+
+2. **Run with Docker (Recommended)**:
+   ```bash
+   docker-compose up --build
+   ```
+
+3. **Access the services**:
+   - **Frontend**: `http://localhost:8501`
+   - **API Docs**: `http://localhost:8000/docs`
+
+For detailed installation and technical details, see [DOCUMENTATION.md](DOCUMENTATION.md).
