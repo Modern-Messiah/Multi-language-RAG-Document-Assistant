@@ -40,4 +40,13 @@ The system follows a modular architecture:
    - **Frontend**: `http://localhost:8501`
    - **API Docs**: `http://localhost:8000/docs`
 
+4. **Telegram Bot**:
+   - Start the bot by sending `/start` to `@MultiLanguageRAGBot`
+   - Use `/upload` to upload documents and `/query` to ask questions.
+
+
+![Demonstration of work](docs/assets/front.gif)
+
+![Demonstration of work](docs/assets/tg.gif)
+
 For detailed installation and technical details, see [DOCUMENTATION.md](DOCUMENTATION.md).
