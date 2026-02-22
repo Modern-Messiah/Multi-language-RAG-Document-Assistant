@@ -2,19 +2,19 @@
 
 A production-ready, multi-language **Retrieval-Augmented Generation (RAG)** assistant designed for querying multiple documents with accurate source attribution.
 
-## ✨ Key Features
+## Key Features
 
-- **📄 Multi-document Support**: Efficiently handles PDF and TXT file uploads.
-- **🌍 Multilingual Intelligence**: Supports questions and answers in English, Russian, Kazakh, French, German, Spanish, Chinese, and Japanese.
-- **🔍 Semantic Search**: Powered by **ChromaDB** for fast and relevant document retrieval.
-- **🎯 Accurate Attribution**: Every answer comes with citations and text previews from the source documents.
-- **💻 Multiple Interfaces**:
+- **Multi-document Support**: Efficiently handles PDF and TXT file uploads.
+- **Multilingual Intelligence**: Supports questions and answers in English, Russian, Kazakh, French, German, Spanish, Chinese, and Japanese.
+- **Semantic Search**: Powered by **ChromaDB** for fast and relevant document retrieval.
+- **Accurate Attribution**: Every answer comes with citations and text previews from the source documents.
+- **Multiple Interfaces**:
   - **FastAPI Backend**: Robust and scalable API.
   - **Streamlit Web UI**: Responsive and user-friendly interface.
   - **Telegram Bot**: Query your documents on the go.
-- **🐳 Dockerized**: Easy deployment using Docker and Docker Compose.
+- **Dockerized**: Easy deployment using Docker and Docker Compose.
 
-## 🏗 Architecture Overview
+## Architecture Overview
 
 The system follows a modular architecture:
 - **Frontend**: Streamlit application for web-based interaction.
@@ -23,7 +23,7 @@ The system follows a modular architecture:
 - **RAG Core**: Custom document loading, chunking, and retrieval logic using LangChain-like patterns.
 - **Storage**: ChromaDB for vector embeddings and local filesystem for raw uploads.
 
-## 🚀 Quick Start
+## Quick Start
 
 1. **Clone & Set up Environment**:
    ```bash
