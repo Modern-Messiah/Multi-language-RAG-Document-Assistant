@@ -2,7 +2,7 @@
 
 A production-ready RAG (Retrieval-Augmented Generation) assistant that allows users to query documents (PDF, XT) in multiple languages with accurate source attribution.
 
-## 🚀 Key Features
+## Key Features
 
 - **Multi-document Support**: specialized loaders for PDF and TXT files.
 - **Intelligent Chunking**: Overlapping chunks to preserve context (500 chars with 50 chars overlap).
@@ -14,7 +14,7 @@ A production-ready RAG (Retrieval-Augmented Generation) assistant that allows us
 - **Telegram Bot**: Full-featured bot integration for mobile access.
 - **User Isolation**: Support for `user_id` to separate indexed documents between users.
 
-## 🏗 System Architecture
+## System Architecture
 
 The project follows a decoupled client-server architecture:
 
@@ -58,7 +58,7 @@ graph TD
     -   **Embeddings Manager (`rag/embeddings.py`)**: Handles OpenAI embeddings and ChromaDB persistence.
     -   **RAG Chain (`rag/chain.py`)**: Orchestrates the retrieval and generation process with language-specific rules.
 
-## 🛠 Installation & Setup
+## Installation & Setup
 
 ### Prerequisites
 
@@ -94,7 +94,7 @@ graph TD
     TEMPERATURE=0
     ```
 
-## 🐳 Docker Deployment (Recommended)
+## Docker Deployment (Recommended)
 
 The easiest way to run the entire project is using Docker Compose.
 
@@ -108,7 +108,7 @@ This will start:
 - **Streamlit Frontend**: `http://localhost:8501`
 - **Telegram Bot**: Automatically connects to Telegram.
 
-## 🏃‍♂️ Usage
+## Usage
 
 ### 1. Backend API
 The API is the core of the system. You can interact with it via `http://localhost:8000/docs`.
@@ -122,7 +122,7 @@ Open your browser at `http://localhost:8501`. Use the sidebar for uploads and ch
 3. Upload a document (PDF/TXT).
 4. Ask any question.
 
-## 📡 API Reference
+## API Reference
 
 ### `POST /upload`
 Uploads and indexes a document.
@@ -140,14 +140,14 @@ Deletes documents from the vector store.
 -   **Query Parameters**: `user_id` (optional).
 -   **Response**: `{"message": "Documents cleared successfully"}`
 
-## 🔒 User Isolation
+## User Isolation
 
 To ensure users don't see each other's documents, the system uses a `user_id` attribute in metadata. 
 - When uploading, `user_id` is stored with each chunk.
 - When querying, the retriever filters results by the provided `user_id`.
 - The Streamlit app uses a default `user_id` of `streamlit_user`.
 
-## ⚙️ Configuration
+## Configuration
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |
@@ -163,11 +163,13 @@ To ensure users don't see each other's documents, the system uses a `user_id` at
 ├── app/
 │   ├── main.py              # API Entry point
 │   ├── models/              # Pydantic models (QueryRequest, QueryResponse)
-│   └── rag/                 # RAG Core logic
-│       ├── document_loader.py # File parsing (PDF/TXT)
-│       ├── text_splitter.py   # Recursive chunking
-│       ├── embeddings.py      # Vector DB management (ChromaDB)
-│       └── chain.py           # Retrieval-QA Chain & Prompts
+│   ├── rag/                 # RAG Core logic
+│   │   ├── document_loader.py # File parsing (PDF/TXT)
+│   │   ├── text_splitter.py   # Recursive chunking
+│   │   ├── embeddings.py      # Vector DB management (ChromaDB)
+│   │   └── chain.py           # Retrieval-QA Chain & Prompts
+│   └── docs/
+│       └── assets/          # Documentation assets (GIFs, images)
 ├── frontend/
 │   └── streamlit_app.py     # Streamlit UI implementation
 ├── telegram/
