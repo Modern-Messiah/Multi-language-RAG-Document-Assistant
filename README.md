@@ -45,6 +45,9 @@ The system follows a modular architecture:
    - Use `/upload` to upload documents and `/query` to ask questions.
 
 
+**Demonstration of work**
+
+
 ![Demonstration of work](app/docs/assets/front.gif)
 
 ![Demonstration of work](app/docs/assets/tg.gif)
