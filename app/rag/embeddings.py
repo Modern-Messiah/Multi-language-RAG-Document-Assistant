@@ -12,7 +12,6 @@ import os
 import logging
 from pathlib import Path
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -188,35 +187,63 @@ class EmbeddingsManager:
     
     def add_documents(
         self,
-        documents: List[Document]
+        documents: List[Document],
+        ids: Optional[List[str]] = None
     ) -> List[str]:
         """
         Add documents to existing vectorstore
-        
+
         Args:
             documents: List of Document objects to add
-            
+            ids: Optional stable IDs. NOTE: Chroma UPSERTS on an existing ID
+                 (overwrites the record, it does not skip), so IDs must be
+                 unique per owner+content; dedup is the caller's job.
+
         Returns:
             List of document IDs
         """
-        if not self.vectorstore:
+        if self.vectorstore is None:
             raise ValueError("No vectorstore loaded. Create or load one first.")
-        
+
         if not documents:
             raise ValueError("No documents provided")
-        
+
         logger.info(f"🔄 Adding {len(documents)} documents to vectorstore...")
-        
+
         try:
-            ids = self.vectorstore.add_documents(documents)
-            
-            logger.info(f"✅ Added {len(ids)} documents")
-            
-            return ids
-            
+            if ids is not None:
+                added = self.vectorstore.add_documents(documents, ids=ids)
+            else:
+                added = self.vectorstore.add_documents(documents)
+
+            logger.info(f"✅ Added {len(added)} documents")
+
+            return added
+
         except Exception as e:
             logger.error(f"❌ Error adding documents: {str(e)}")
             raise
+
+    def has_file_hash(
+        self,
+        file_hash: str,
+        owner: str
+    ) -> bool:
+        """
+        Check whether this owner already indexed a document with this content
+        hash. Always owner-scoped: an unscoped hash lookup would leak whether
+        OTHER users possess a given file and would drop legitimate uploads.
+        """
+        if self.vectorstore is None:
+            return False
+
+        where = {"$and": [
+            {"file_hash": {"$eq": file_hash}},
+            {"user_id": {"$eq": owner}}
+        ]}
+
+        results = self.vectorstore._collection.get(where=where, limit=1)
+        return bool(results.get("ids"))
 
     def delete_documents(self, filter: dict):
         """
@@ -225,7 +252,7 @@ class EmbeddingsManager:
         Args:
             filter: Metadata filter (e.g. {"user_id": "123"})
         """
-        if not self.vectorstore:
+        if self.vectorstore is None:
             return
 
         try:
@@ -261,7 +288,7 @@ class EmbeddingsManager:
         Returns:
             List of most similar Document objects
         """
-        if not self.vectorstore:
+        if self.vectorstore is None:
             raise ValueError("No vectorstore loaded. Create or load one first.")
         
         logger.info(f"🔍 Searching for: '{query[:50]}...' (top {k})")
@@ -296,7 +323,7 @@ class EmbeddingsManager:
         Returns:
             List of (Document, score) tuples
         """
-        if not self.vectorstore:
+        if self.vectorstore is None:
             raise ValueError("No vectorstore loaded")
         
         try:
@@ -346,7 +373,7 @@ class EmbeddingsManager:
         Returns:
             Dictionary with collection information
         """
-        if not self.vectorstore:
+        if self.vectorstore is None:
             return {"error": "No vectorstore loaded"}
         
         try:
