@@ -124,23 +124,46 @@ st.markdown("<hr>", unsafe_allow_html=True)
 with st.sidebar:
     st.header("📎 Upload documents")
 
+    # The uploader is keyed off session_state so Clear can reset the widget:
+    # bumping the key discards held files, otherwise the rerun after Clear
+    # would instantly re-upload everything still sitting in the uploader.
+    st.session_state.setdefault("uploader_key", 0)
+
     uploaded_files = st.file_uploader(
         "TXT or PDF files (max 30 MB per file)",
         type=["txt", "pdf"],
-        accept_multiple_files=True
+        accept_multiple_files=True,
+        key=f"uploader_{st.session_state['uploader_key']}"
     )
 
     if uploaded_files:
+        # Streamlit reruns this script on every interaction; without this
+        # guard every click re-uploads all files still in the uploader widget
+        indexed_files = st.session_state.setdefault("indexed_files", set())
+
         for file in uploaded_files:
+            file_key = (file.name, file.size)
+            if file_key in indexed_files:
+                continue
+
             with st.spinner(f"Processing {file.name}..."):
-                response = requests.post(
-                    f"{API_URL}/upload",
-                    files={"file": file},
-                    params={"user_id": "streamlit_user"}
-                )
+                try:
+                    response = requests.post(
+                        f"{API_URL}/upload",
+                        files={"file": file},
+                        params={"user_id": "streamlit_user"},
+                        timeout=120
+                    )
+                except requests.RequestException as e:
+                    st.error(f"Upload failed: {e}")
+                    continue
 
             if response.status_code == 200:
-                st.success(f"{file.name} indexed")
+                indexed_files.add(file_key)
+                if response.json().get("duplicate"):
+                    st.info(f"{file.name} already indexed")
+                else:
+                    st.success(f"{file.name} indexed")
             else:
                 st.error(response.text)
 
@@ -171,10 +194,18 @@ with st.sidebar:
 
     if st.button("🗑️ Clear all documents", use_container_width=True):
         try:
-            resp = requests.post(f"{API_URL}/clear", params={"user_id": "streamlit_user"})
+            resp = requests.post(
+                f"{API_URL}/clear",
+                params={"user_id": "streamlit_user"},
+                timeout=60
+            )
             if resp.status_code == 200:
+                st.session_state.pop("indexed_files", None)
+                st.session_state["uploader_key"] += 1
                 st.success("Cleared!")
                 st.rerun()
+            else:
+                st.error(resp.text)
         except Exception as e:
             st.error(f"Error: {e}")
 
@@ -218,14 +249,19 @@ if ask_btn:
         st.stop()
 
     with st.spinner("Thinking..."):
-        response = requests.post(
-            f"{API_URL}/query",
-            json={
-                "question": question,
-                "language": language,
-                "user_id": "streamlit_user"
-            }
-        )
+        try:
+            response = requests.post(
+                f"{API_URL}/query",
+                json={
+                    "question": question,
+                    "language": language,
+                    "user_id": "streamlit_user"
+                },
+                timeout=120
+            )
+        except requests.RequestException as e:
+            st.error(f"Backend unavailable: {e}")
+            st.stop()
 
     if response.status_code != 200:
         st.error(response.text)
