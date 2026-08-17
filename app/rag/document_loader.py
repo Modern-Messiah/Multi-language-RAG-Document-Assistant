@@ -3,17 +3,13 @@ Document Loader for RAG Assistant
 Supports PDF and TXT files with metadata extraction
 """
 
-from langchain_community.document_loaders import PyPDFLoader, TextLoader
+from charset_normalizer import from_bytes
+from langchain_community.document_loaders import PyPDFLoader
 from pathlib import Path
 from typing import List
 from langchain.schema import Document
 import logging
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 
@@ -100,29 +96,36 @@ class DocumentLoader:
         
         try:
             logger.info(f"📝 Loading TXT: {file_path.name}")
-            
-            # Try different encodings
-            for encoding in ['utf-8', 'latin-1', 'cp1252']:
-                try:
-                    loader = TextLoader(str(file_path), encoding=encoding)
-                    documents = loader.load()
-                    break
-                except UnicodeDecodeError:
-                    continue
-            else:
-                raise ValueError(f"Could not decode text file: {file_path.name}")
-            
-            if not documents or not documents[0].page_content.strip():
+
+            raw = file_path.read_bytes()
+            try:
+                # utf-8-sig also handles plain utf-8 and strips a BOM if present
+                text = raw.decode("utf-8-sig")
+                encoding = "utf-8"
+            except UnicodeDecodeError:
+                # Legacy encodings (cp1251 for Russian/Kazakh, cp1252, koi8-r, ...)
+                # cannot be told apart by decode-success, so use charset detection
+                best = from_bytes(raw).best()
+                if best is None:
+                    raise ValueError(
+                        f"Could not decode text file: {file_path.name}"
+                    )
+                text = str(best)
+                encoding = best.encoding
+
+            if not text.strip():
                 raise ValueError(f"Text file appears to be empty: {file_path.name}")
-            
-            # Enrich metadata
-            for doc in documents:
-                doc.metadata.update({
+
+            documents = [Document(
+                page_content=text,
+                metadata={
                     "source": file_path.name,
                     "type": "txt",
                     "file_path": str(file_path),
-                    "char_count": len(doc.page_content)
-                })
+                    "char_count": len(text),
+                    "encoding": encoding
+                }
+            )]
             
             logger.info(
                 f"✅ Loaded {len(documents[0].page_content)} characters "
