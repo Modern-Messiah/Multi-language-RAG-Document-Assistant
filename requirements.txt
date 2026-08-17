@@ -9,6 +9,7 @@ chromadb==0.4.24
 # Document Processing
 pypdf==4.2.0
 python-docx==1.1.0
+charset-normalizer==3.3.2
 
 # API
 fastapi==0.111.0
