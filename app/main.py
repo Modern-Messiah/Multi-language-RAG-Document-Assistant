@@ -39,6 +39,19 @@ MAX_STEM_BYTES = 150
 MAX_EXT_LEN = 10
 
 
+def human_size(num_bytes: int) -> str:
+    """Render a byte count in the largest unit that keeps it readable.
+
+    Formatting MB with "{:.0f}" alone reported a 1 KB limit as "0 MB".
+    """
+    for unit, size in (("MB", 1024 * 1024), ("KB", 1024)):
+        if num_bytes >= size:
+            # One decimal, but "5.0 MB" reads worse than "5 MB".
+            value = f"{num_bytes / size:.1f}".rstrip("0").rstrip(".")
+            return f"{value} {unit}"
+    return f"{num_bytes} bytes"
+
+
 def safe_filename(name: str) -> str:
     """Reduce a client-supplied filename to a safe, length-bounded basename."""
     name = os.path.basename((name or "").replace("\\", "/"))
@@ -169,10 +182,12 @@ async def upload_document(
         )
 
     def too_large() -> HTTPException:
-        limit_mb = settings.max_file_size / (1024 * 1024)
         return HTTPException(
             status_code=400,
-            detail=f"File too large. Maximum allowed size is {limit_mb:.0f} MB."
+            detail=(
+                "File too large. Maximum allowed size is "
+                f"{human_size(settings.max_file_size)}."
+            )
         )
 
     # 🔒 Reject on the size starlette already knows, BEFORE pulling the body
@@ -196,7 +211,13 @@ async def upload_document(
     file_hash = hashlib.sha256(contents).hexdigest()[:16]
 
     # ♻️ Identical content already indexed for this owner — skip re-embedding
-    if state.embeddings.has_file_hash(file_hash, user_id):
+    try:
+        already_indexed = state.embeddings.has_file_hash(file_hash, user_id)
+    except Exception:
+        logger.exception("Dedup lookup failed")
+        raise HTTPException(status_code=503, detail="Vector store unavailable")
+
+    if already_indexed:
         return {
             "message": "Document already indexed (identical content)",
             "filename": safe_name,
@@ -207,9 +228,15 @@ async def upload_document(
     # 💾 Save file under the user's own directory, keyed by content hash.
     # user_id is validated ([A-Za-z0-9_-]{1,64}), so it is path-safe as-is.
     owner_dir = settings.upload_dir / user_id
-    owner_dir.mkdir(parents=True, exist_ok=True)
     file_path = owner_dir / f"{file_hash}_{safe_name}"
-    file_path.write_bytes(contents)
+    try:
+        owner_dir.mkdir(parents=True, exist_ok=True)
+        file_path.write_bytes(contents)
+    except OSError:
+        # A full or read-only volume is a server-side condition, not a bad
+        # request, and it used to surface as a bare 500 with a traceback.
+        logger.exception("Could not store the uploaded file")
+        raise HTTPException(status_code=503, detail="Storage unavailable")
 
     # 📄 Load & chunk. A corrupt or text-free PDF used to escape as an
     # unhandled exception (bare 500 + traceback); it is a bad request, and the

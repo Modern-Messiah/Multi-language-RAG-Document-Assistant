@@ -221,7 +221,7 @@ Uploads and indexes a document.
 ### `POST /query`
 Asks a question against the indexed documents.
 -   **Body**: `{"question": "...", "language": "Auto", "user_id": "..."}`.
-    `question` must be non-empty; `language` is one of the values in
+    `question` must be 1–4000 characters; `language` is one of the values in
     [Supported languages](#supported-languages), defaulting to `Auto`. An unrecognised
     value falls back to `Auto` behaviour rather than failing.
 -   **Response**:
@@ -281,7 +281,7 @@ variable of the same name, read from `.env` or the process environment.
 | `OPENAI_API_KEY` | **Required.** Your OpenAI API key; startup fails without it. | — |
 | `BACKEND_API_KEY` | Shared secret for the `X-API-Key` header. Empty disables auth (development only). Must be ASCII. | `""` |
 | `MODEL_NAME` | Chat model used for generation. | `gpt-4o-mini` |
-| `EMBEDDING_MODEL` | OpenAI embedding model. | `text-embedding-3-small` |
+| `EMBEDDING_MODEL` | OpenAI embedding model. Recorded in the collection; changing it against an existing collection is refused at startup. | `text-embedding-3-small` |
 | `TEMPERATURE` | Sampling temperature, `0.0`–`2.0`. | `0.0` |
 | `TOP_K_RESULTS` | Chunks retrieved per question, `>= 1`. | `5` |
 | `CHUNK_SIZE` | Characters per chunk, `>= 1`. | `1000` |
@@ -296,6 +296,16 @@ variable of the same name, read from `.env` or the process environment.
 Invalid combinations are rejected at startup rather than at first use — for example
 `CHUNK_OVERLAP >= CHUNK_SIZE`, a negative `TOP_K_RESULTS`, or a non-ASCII
 `BACKEND_API_KEY` (HTTP headers cannot carry non-ASCII, so such a key could never match).
+
+### Changing the embedding model
+
+The embedding model is recorded in the ChromaDB collection's metadata the first time
+it is opened. Pointing `EMBEDDING_MODEL` at a different model afterwards **fails at
+startup with an explanatory error** rather than proceeding: vectors produced by two
+models are not comparable, and their dimensions usually differ outright (1536 for
+`text-embedding-3-small` vs 3072 for `-large`), so mixing them silently corrupts every
+subsequent search. To switch models, delete the collection directory
+(`CHROMA_PERSIST_DIR`) and re-index.
 
 ## 📁 Directory Structure
 

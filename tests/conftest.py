@@ -39,7 +39,30 @@ def _is_loopback(address) -> bool:
 
 
 @pytest.fixture(autouse=True, scope="session")
-def _no_real_network():
+def _isolated_environment():
+    """Strip every app setting from the process environment.
+
+    Settings(_env_file=None, ...) suppresses only the .env source; the
+    environment source stays in the chain, so an exported CHUNK_SIZE or
+    MODEL_NAME would silently change what the tests exercise.
+    """
+    import os
+
+    from app.config import Settings
+
+    saved = {}
+    for name in Settings.model_fields:
+        key = name.upper()
+        if key in os.environ:
+            saved[key] = os.environ.pop(key)
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _no_real_network(_isolated_environment):
     """Fail any attempt to reach a host outside this machine.
 
     OPENAI_API_KEY is set unconditionally rather than via setdefault: a

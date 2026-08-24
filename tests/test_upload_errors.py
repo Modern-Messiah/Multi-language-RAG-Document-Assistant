@@ -1,4 +1,6 @@
 """Upload failure modes: honest status codes, no orphaned files, size limit."""
+import pytest
+
 from tests.conftest import make_settings
 
 TXT = b"RAG systems combine retrieval with generation to answer questions."
@@ -170,3 +172,48 @@ def test_unsupported_extensions_are_rejected(api):
 
 def test_uppercase_extension_is_accepted(api):
     assert _upload(api, "doc.TXT", TXT).status_code == 200
+
+
+# =========================
+# Size rendering
+# =========================
+
+@pytest.mark.parametrize(
+    "num_bytes,expected",
+    [
+        (30 * 1024 * 1024, "30 MB"),
+        (5 * 1024 * 1024, "5 MB"),
+        (int(1.5 * 1024 * 1024), "1.5 MB"),
+        (1024 * 1024, "1 MB"),
+        (100 * 1024, "100 KB"),
+        (1024, "1 KB"),
+        (1536, "1.5 KB"),
+        (512, "512 bytes"),
+        (0, "0 bytes"),
+    ],
+)
+def test_human_size_never_rounds_a_real_limit_to_zero(num_bytes, expected):
+    """A 1 KB limit used to be reported as "0 MB"."""
+    from app.main import human_size
+
+    assert human_size(num_bytes) == expected
+
+
+def test_small_limit_is_reported_in_kb(tmp_path, fake_openai_embeddings):
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+    from tests.conftest import TEST_API_KEY
+
+    app = create_app(make_settings(tmp_path, max_file_size=1024))
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        client.headers["X-API-Key"] = TEST_API_KEY
+        response = client.post(
+            "/upload",
+            params={"user_id": "u1"},
+            files={"file": ("big.txt", b"A" * 4096, "text/plain")},
+        )
+
+    assert response.status_code == 400
+    assert "1 KB" in response.json()["detail"], response.json()
