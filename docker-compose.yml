@@ -1,15 +1,24 @@
+# Production-shaped base: code baked into the image, no live-reload mounts.
+# For development, docker-compose.override.yml (auto-merged by
+# `docker compose up`) adds bind mounts and --reload.
+# Explicit production run: docker compose -f docker-compose.yml up -d
 services:
   backend:
     build: .
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     volumes:
-      - .:/app
       - data_uploads:/app/data/uploads
       - data_chroma:/app/data/chroma_db
     env_file:
       - .env
     ports:
-      - "8000:8000"
+      # Bound to loopback: the API's only credential is one shared secret, and
+      # user_id is unauthenticated client input, so it is not safe to expose.
+      # Frontend and bot reach it over rag_net instead.
+      # NOTE: the frontend below IS published on all interfaces and has no
+      # authentication of its own while holding that same secret — put it
+      # behind an authenticating reverse proxy on any untrusted network.
+      - "127.0.0.1:8000:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
       interval: 15s
@@ -23,8 +32,6 @@ services:
   frontend:
     build: .
     command: streamlit run frontend/streamlit_app.py --server.port 8501 --server.address 0.0.0.0
-    volumes:
-      - .:/app
     environment:
       - BACKEND_URL=http://backend:8000
     env_file:
@@ -41,8 +48,6 @@ services:
   bot:
     build: .
     command: python telegram/bot.py
-    volumes:
-      - .:/app
     environment:
       - BACKEND_URL=http://backend:8000
     env_file:

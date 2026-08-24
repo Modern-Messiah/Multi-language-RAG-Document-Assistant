@@ -2,22 +2,25 @@
 Embeddings Manager for RAG Assistant
 Handles vector generation and ChromaDB operations
 """
-import httpx
-from openai import OpenAI
-from typing import List
-from langchain_community.vectorstores import Chroma
-from langchain.schema import Document
-from typing import List, Optional
-import os
 import logging
+import os
 from pathlib import Path
+from typing import List, Optional
+
+import chromadb
+import httpx
+from chromadb.config import Settings as ChromaSettings
+from langchain.schema import Document
+from langchain_chroma import Chroma
+from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
 
 class OpenAIEmbeddingFunction:
-    def __init__(self, model: str):
+    def __init__(self, model: str, api_key: Optional[str] = None):
         self.client = OpenAI(
+            api_key=api_key,  # None -> read from OPENAI_API_KEY env
             http_client=httpx.Client(trust_env=False)
         )
         self.model = model
@@ -51,147 +54,123 @@ class OpenAIEmbeddingFunction:
         return response.data[0].embedding
 
 
-
 class EmbeddingsManager:
     """
-    Manage embeddings generation and vector store operations
-    
-    Features:
-    - Generate embeddings using OpenAI
-    - Store vectors in ChromaDB
-    - Perform similarity search
-    - Manage collections
+    Manage embeddings generation and vector store operations.
+
+    Owns a chromadb.PersistentClient so every operation (count, delete by
+    filter, drop collection) goes through the supported public API instead
+    of the langchain wrapper's private attributes.
     """
-    
+
     def __init__(
         self,
         persist_directory: str = "./data/chroma_db",
-        embedding_model: str = "text-embedding-3-small"
- ):
+        embedding_model: str = "text-embedding-3-small",
+        embedding_fn=None,
+        api_key: Optional[str] = None,
+    ):
         """
-        Initialize embeddings manager
-        
         Args:
             persist_directory: Path to ChromaDB storage
             embedding_model: OpenAI embedding model to use
+            embedding_fn: Injectable embeddings object (tests); defaults to
+                OpenAIEmbeddingFunction over the OpenAI API
+            api_key: OpenAI API key; defaults to the OPENAI_API_KEY env var
         """
         self.persist_directory = Path(persist_directory)
-        self.persist_directory.mkdir(parents=True, exist_ok=True)
-        
-        # Check for API key
-        if not os.getenv("OPENAI_API_KEY"):
-            raise ValueError(
-                "OPENAI_API_KEY not found in environment. "
-                "Please set it in .env file"
-            )
-        
-        # Initialize embeddings
-        self.embeddings = OpenAIEmbeddingFunction(
-            model=embedding_model)
+        self.embedding_model_name = embedding_model
 
-        
+        if embedding_fn is not None:
+            self.embeddings = embedding_fn
+        else:
+            if not (api_key or os.getenv("OPENAI_API_KEY")):
+                raise ValueError(
+                    "OPENAI_API_KEY not found in environment. "
+                    "Please set it in .env file"
+                )
+            self.embeddings = OpenAIEmbeddingFunction(
+                model=embedding_model, api_key=api_key
+            )
+
+        self.client = chromadb.PersistentClient(
+            path=str(self.persist_directory),
+            settings=ChromaSettings(anonymized_telemetry=False),
+        )
+
         self.vectorstore: Optional[Chroma] = None
-        
+        self.collection = None
+
         logger.info(
             f"✅ Initialized EmbeddingsManager: "
             f"model={embedding_model}, dir={persist_directory}"
         )
-    
+
+    # =========================
+    # Collection lifecycle
+    # =========================
+    def get_vectorstore(self, collection_name: str = "documents") -> Chroma:
+        """Open (get-or-create) a collection and bind the langchain wrapper."""
+        self.collection = self.client.get_or_create_collection(collection_name)
+        self.vectorstore = Chroma(
+            client=self.client,
+            collection_name=collection_name,
+            embedding_function=self.embeddings,
+        )
+
+        count = self.collection.count()
+        if count == 0:
+            logger.info(f"ℹ️ Collection '{collection_name}' is empty")
+        else:
+            logger.info(
+                f"✅ Opened collection '{collection_name}' with {count} vectors"
+            )
+        return self.vectorstore
+
+    def load_vectorstore(self, collection_name: str = "documents") -> Chroma:
+        """Backwards-compatible alias for get_vectorstore."""
+        return self.get_vectorstore(collection_name)
+
     def create_vectorstore(
         self,
         documents: List[Document],
         collection_name: str = "documents"
     ) -> Chroma:
-        """
-        Create new vector store from documents
-        
-        Args:
-            documents: List of Document objects to embed
-            collection_name: Name for the ChromaDB collection
-            
-        Returns:
-            Chroma vectorstore instance
-        """
+        """Open a collection and add the given documents (compat wrapper)."""
         if not documents:
             raise ValueError("No documents provided for embedding")
-        
-        logger.info(
-            f"🔄 Creating vectorstore with {len(documents)} documents..."
-        )
-        
+
+        self.get_vectorstore(collection_name)
+        self.add_documents(documents)
+        return self.vectorstore
+
+    def delete_collection(self, collection_name: str = "documents"):
+        """Drop a collection and all its vectors."""
         try:
-            # Create vectorstore
-            self.vectorstore = Chroma.from_documents(
-                documents=documents,
-                embedding=self.embeddings,
-                persist_directory=str(self.persist_directory),
-                collection_name=collection_name
-            )
-            
-            # Get collection info
-            collection = self.vectorstore._collection
-            count = collection.count()
-            
-            logger.info(
-                f"✅ Created vectorstore '{collection_name}' "
-                f"with {count} vectors"
-            )
-            
-            return self.vectorstore
-            
+            self.client.delete_collection(collection_name)
+            self.vectorstore = None
+            self.collection = None
+            logger.info(f"✅ Deleted collection '{collection_name}'")
         except Exception as e:
-            logger.error(f"❌ Error creating vectorstore: {str(e)}")
+            logger.error(f"❌ Error deleting collection: {str(e)}")
             raise
-    
-    def load_vectorstore(
-        self,
-        collection_name: str = "documents"
-    ) -> Chroma:
-        """
-        Load existing vector store
-        
-        Args:
-            collection_name: Name of the ChromaDB collection to load
-            
-        Returns:
-            Chroma vectorstore instance
-        """
-        try:
-            logger.info(f"🔄 Loading vectorstore '{collection_name}'...")
-            
-            self.vectorstore = Chroma(
-                persist_directory=str(self.persist_directory),
-                embedding_function=self.embeddings,
-                collection_name=collection_name
-            )
-            
-            # Verify collection exists and has data
-            collection = self.vectorstore._collection
-            count = collection.count()
-            
-            if count == 0:
-                logger.warning(
-                    f"⚠️ Collection '{collection_name}' exists but is empty"
-                )
-            else:
-                logger.info(
-                    f"✅ Loaded vectorstore '{collection_name}' "
-                    f"with {count} vectors"
-                )
-            
-            return self.vectorstore
-            
-        except Exception as e:
-            logger.error(f"❌ Error loading vectorstore: {str(e)}")
-            raise
-    
+
+    def count(self) -> int:
+        """Number of vectors in the currently open collection."""
+        if self.collection is None:
+            return 0
+        return self.collection.count()
+
+    # =========================
+    # Documents
+    # =========================
     def add_documents(
         self,
         documents: List[Document],
         ids: Optional[List[str]] = None
     ) -> List[str]:
         """
-        Add documents to existing vectorstore
+        Add documents to the open collection.
 
         Args:
             documents: List of Document objects to add
@@ -234,7 +213,7 @@ class EmbeddingsManager:
         hash. Always owner-scoped: an unscoped hash lookup would leak whether
         OTHER users possess a given file and would drop legitimate uploads.
         """
-        if self.vectorstore is None:
+        if self.collection is None:
             return False
 
         where = {"$and": [
@@ -242,35 +221,30 @@ class EmbeddingsManager:
             {"user_id": {"$eq": owner}}
         ]}
 
-        results = self.vectorstore._collection.get(where=where, limit=1)
+        results = self.collection.get(where=where, limit=1)
         return bool(results.get("ids"))
 
     def delete_documents(self, filter: dict):
         """
-        Delete documents from vectorstore by filter
-        
+        Delete documents from the open collection by metadata filter.
+
         Args:
             filter: Metadata filter (e.g. {"user_id": "123"})
         """
-        if self.vectorstore is None:
+        if self.collection is None:
             return
 
         try:
-            logger.info(f"🔄 Fetching document IDs with filter: {filter}")
-            # Use the underlying collection to get IDs matching the filter
-            results = self.vectorstore._collection.get(where=filter)
-            ids = results.get("ids", [])
-            
-            if ids:
-                logger.info(f"🗑️ Deleting {len(ids)} documents...")
-                self.vectorstore.delete(ids=ids)
-                logger.info("✅ Documents deleted")
-            else:
-                logger.info("ℹ️ No documents found for this filter")
+            logger.info(f"🗑️ Deleting documents with filter: {filter}")
+            self.collection.delete(where=filter)
+            logger.info("✅ Documents deleted")
         except Exception as e:
             logger.error(f"❌ Error deleting documents: {str(e)}")
             raise
-    
+
+    # =========================
+    # Search
+    # =========================
     def similarity_search(
         self,
         query: str,
@@ -279,114 +253,87 @@ class EmbeddingsManager:
     ) -> List[Document]:
         """
         Search for similar documents
-        
+
         Args:
             query: Search query text
             k: Number of results to return
             filter: Optional metadata filter
-            
+
         Returns:
             List of most similar Document objects
         """
         if self.vectorstore is None:
             raise ValueError("No vectorstore loaded. Create or load one first.")
-        
+
         logger.info(f"🔍 Searching for: '{query[:50]}...' (top {k})")
-        
+
         try:
             results = self.vectorstore.similarity_search(
                 query=query,
                 k=k,
                 filter=filter
             )
-            
+
             logger.info(f"✅ Found {len(results)} results")
-            
+
             return results
-            
+
         except Exception as e:
             logger.error(f"❌ Error searching: {str(e)}")
             raise
-    
+
     def similarity_search_with_score(
         self,
         query: str,
         k: int = 3
-    ) -> List[tuple[Document, float]]:
+    ) -> List[tuple]:
         """
         Search with relevance scores
-        
+
         Args:
             query: Search query text
             k: Number of results to return
-            
+
         Returns:
             List of (Document, score) tuples
         """
         if self.vectorstore is None:
             raise ValueError("No vectorstore loaded")
-        
+
         try:
             results = self.vectorstore.similarity_search_with_score(
                 query=query,
                 k=k
             )
-            
+
             logger.info(
                 f"✅ Found {len(results)} results with scores: "
                 f"{[f'{score:.3f}' for _, score in results]}"
             )
-            
+
             return results
-            
+
         except Exception as e:
             logger.error(f"❌ Error searching with scores: {str(e)}")
             raise
-    
-    def delete_collection(self, collection_name: str = "documents"):
-        """
-        Delete a collection from ChromaDB
-        
-        Args:
-            collection_name: Name of collection to delete
-        """
-        try:
-            if self.vectorstore and self.vectorstore._collection.name == collection_name:
-                self.vectorstore = None
-            
-            # Delete from disk
-            import shutil
-            collection_path = self.persist_directory / collection_name
-            if collection_path.exists():
-                shutil.rmtree(collection_path)
-            
-            logger.info(f"✅ Deleted collection '{collection_name}'")
-            
-        except Exception as e:
-            logger.error(f"❌ Error deleting collection: {str(e)}")
-            raise
-    
+
     def get_collection_info(self) -> dict:
         """
-        Get information about current vectorstore
-        
+        Get information about the currently open collection.
+
         Returns:
             Dictionary with collection information
         """
-        if self.vectorstore is None:
+        if self.collection is None:
             return {"error": "No vectorstore loaded"}
-        
+
         try:
-            collection = self.vectorstore._collection
-            
-            info = {
-                "name": collection.name,
-                "count": collection.count(),
-                "metadata": collection.metadata
+            return {
+                "name": self.collection.name,
+                "count": self.collection.count(),
+                "metadata": self.collection.metadata,
+                "embedding_model": self.embedding_model_name,
             }
-            
-            return info
-            
         except Exception as e:
             logger.error(f"❌ Error getting collection info: {str(e)}")
             return {"error": str(e)}
@@ -395,26 +342,25 @@ class EmbeddingsManager:
 # Testing and example usage
 if __name__ == "__main__":
     """
-    Test the EmbeddingsManager
-    Note: Requires OPENAI_API_KEY in environment
+    Manual smoke run for the EmbeddingsManager.
+    Note: requires OPENAI_API_KEY in the environment and makes real API calls.
     """
     from dotenv import load_dotenv
-    
-    print("\n" + "="*60)
+
+    logging.basicConfig(level=logging.INFO)
+
+    print("\n" + "=" * 60)
     print("Testing EmbeddingsManager")
-    print("="*60 + "\n")
-    
-    # Load environment variables
+    print("=" * 60 + "\n")
+
     load_dotenv()
-    
-    # Check for API key
+
     if not os.getenv("OPENAI_API_KEY"):
         print("❌ Error: OPENAI_API_KEY not found in environment")
         print("   Please create a .env file with:")
         print("   OPENAI_API_KEY=your-key-here\n")
         exit(1)
-    
-    # Sample documents (from previous chunking example)
+
     sample_docs = [
         Document(
             page_content="RAG systems combine retrieval and generation for better AI responses.",
@@ -429,71 +375,28 @@ if __name__ == "__main__":
             metadata={"source": "tools.txt", "page": 1, "chunk_id": 2}
         )
     ]
-    
+
     try:
-        print("1️⃣ Initializing EmbeddingsManager...")
-        print("-" * 60)
-        
-        manager = EmbeddingsManager(
-            persist_directory="./data/test_chroma_db"
-        )
-        
-        print("\n2️⃣ Creating vectorstore...")
-        print("-" * 60)
-        
-        vectorstore = manager.create_vectorstore(
+        manager = EmbeddingsManager(persist_directory="./data/test_chroma_db")
+        manager.create_vectorstore(
             documents=sample_docs,
             collection_name="test_collection"
         )
-        
-        # Get collection info
+
         info = manager.get_collection_info()
-        print(f"\n📊 Collection Info:")
+        print("\n📊 Collection Info:")
         for key, value in info.items():
             print(f"   {key}: {value}")
-        
-        print("\n3️⃣ Testing similarity search...")
-        print("-" * 60)
-        
-        queries = [
-            "What is a vector database?",
-            "How does RAG work?",
-            "Tell me about LangChain"
-        ]
-        
-        for query in queries:
+
+        for query in ["What is a vector database?", "How does RAG work?"]:
             print(f"\n🔍 Query: '{query}'")
-            results = manager.similarity_search(query, k=2)
-            
-            for i, doc in enumerate(results):
-                print(f"\n   Result {i+1}:")
-                print(f"   Source: {doc.metadata.get('source', 'unknown')}")
-                print(f"   Content: {doc.page_content[:80]}...")
-        
-        print("\n4️⃣ Testing search with scores...")
-        print("-" * 60)
-        
-        results_with_scores = manager.similarity_search_with_score(
-            "vector embeddings", 
-            k=3
-        )
-        
-        print("\n📊 Results with relevance scores:")
-        for doc, score in results_with_scores:
-            print(f"\n   Score: {score:.4f}")
-            print(f"   Source: {doc.metadata.get('source', 'unknown')}")
-            print(f"   Content: {doc.page_content[:60]}...")
-        
-        print("\n" + "="*60)
-        print("✅ All tests passed!")
-        print("="*60 + "\n")
-        
-        print("💡 Next steps:")
-        print("   1. Integrate with document_loader and text_splitter")
-        print("   2. Build the RAG chain (Day 3)")
-        print("   3. Create FastAPI endpoints\n")
-        
+            for i, doc in enumerate(manager.similarity_search(query, k=2)):
+                print(f"   Result {i + 1}: {doc.metadata.get('source')}: "
+                      f"{doc.page_content[:60]}...")
+
+        print("\n✅ Smoke run finished\n")
+
     except ValueError as e:
         print(f"\n❌ Configuration error: {str(e)}\n")
     except Exception as e:
-        print(f"\n❌ Test failed: {str(e)}\n")
+        print(f"\n❌ Smoke run failed: {str(e)}\n")

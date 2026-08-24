@@ -3,10 +3,11 @@ Text Splitter for RAG Assistant
 Intelligent chunking with overlap for better context preservation
 """
 
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.schema import Document
-from typing import List
 import logging
+from typing import List
+
+from langchain.schema import Document
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 logger = logging.getLogger(__name__)
 
@@ -222,12 +223,12 @@ and trustworthy for real-world applications.
         
         # Show statistics
         stats = TextChunker.get_chunk_statistics(chunks)
-        print(f"\n📊 Chunk Statistics:")
+        print("\n📊 Chunk Statistics:")
         for key, value in stats.items():
             print(f"   {key}: {value}")
         
         # Show first 3 chunks
-        print(f"\n📄 Sample Chunks (first 3):")
+        print("\n📄 Sample Chunks (first 3):")
         for i, chunk in enumerate(chunks[:3]):
             print(f"\n--- Chunk {i+1} ---")
             print(f"Metadata: {chunk.metadata}")

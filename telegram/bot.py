@@ -1,13 +1,17 @@
-import os
+import html
 import logging
+import os
+
 import httpx
 from dotenv import load_dotenv
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+
+from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram.constants import FileSizeLimit
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    MessageHandler,
     ContextTypes,
+    MessageHandler,
     filters,
 )
 
@@ -25,10 +29,28 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
+# Shared secret for the backend; empty means the backend runs with auth
+# disabled (development mode) and the header is simply ignored.
+BACKEND_HEADERS = {"X-API-Key": os.getenv("BACKEND_API_KEY", "")}
+
 LANGUAGES = [
     "Auto", "English", "Русский", "Қазақша", 
     "Français", "Deutsch", "Español", "中文", "日本語"
 ]
+
+def backend_error(response) -> str:
+    """Extract a safe, human-readable reason from a failed backend response.
+
+    response.json() raises on a non-JSON body (a proxy's HTML 502 page, an
+    empty 500), which previously turned a bad status into an unrelated
+    exception in the caller.
+    """
+    try:
+        detail = response.json().get("detail")
+    except ValueError:
+        detail = None
+    return str(detail) if detail else f"Backend error (HTTP {response.status_code})"
+
 
 def get_language_keyboard():
     keyboard = []
@@ -67,8 +89,9 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                f"{BACKEND_URL}/clear", 
-                params={"user_id": user_id}
+                f"{BACKEND_URL}/clear",
+                params={"user_id": user_id},
+                headers=BACKEND_HEADERS
             )
             if response.status_code == 200:
                 await update.message.reply_text("✅ All your documents have been cleared!")
@@ -81,10 +104,22 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle uploaded documents."""
     doc = update.message.document
-    file_name = doc.file_name
+    # Document.file_name is Optional in the Bot API (some forwarded or
+    # generated attachments arrive without one), so guard before .lower().
+    file_name = doc.file_name or ""
     
     if not file_name.lower().endswith(('.pdf', '.txt')):
         await update.message.reply_text("Sorry, I only support PDF and TXT files.")
+        return
+
+    # Telegram refuses getFile above 20 MB regardless of what the backend
+    # accepts, and the failure used to surface as a bare "an error occurred".
+    if doc.file_size and doc.file_size > FileSizeLimit.FILESIZE_DOWNLOAD:
+        limit_mb = FileSizeLimit.FILESIZE_DOWNLOAD // (1000 * 1000)
+        await update.message.reply_text(
+            f"That file is too big for me to download — Telegram limits bots "
+            f"to {limit_mb} MB. Try splitting it."
+        )
         return
 
     status_msg = await update.message.reply_text(f"Processing {file_name}...")
@@ -99,19 +134,21 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             files = {'file': (file_name, bytes(file_bytes))}
             params = {'user_id': str(update.effective_user.id)}
             response = await client.post(
-                f"{BACKEND_URL}/upload", 
-                files=files, 
-                params=params
+                f"{BACKEND_URL}/upload",
+                files=files,
+                params=params,
+                headers=BACKEND_HEADERS
             )
-            
+
             if response.status_code == 200:
-                data = response.json()
-                await status_msg.edit_text(
-                    f"✅ Document processed successfully!"
-                )
+                if response.json().get("duplicate"):
+                    await status_msg.edit_text("ℹ️ This document is already indexed.")
+                else:
+                    await status_msg.edit_text("✅ Document processed successfully!")
             else:
-                detail = response.json().get('detail', 'Unknown error')
-                await status_msg.edit_text(f"❌ Failed to process document: {detail}")
+                await status_msg.edit_text(
+                    f"❌ Failed to process document: {backend_error(response)}"
+                )
                 
     except Exception as e:
         logger.error(f"Error handling document: {e}")
@@ -144,25 +181,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "language": language,
                 "user_id": str(update.effective_user.id)
             }
-            response = await client.post(f"{BACKEND_URL}/query", json=payload)
+            response = await client.post(
+                f"{BACKEND_URL}/query", json=payload, headers=BACKEND_HEADERS
+            )
             
             if response.status_code == 200:
                 data = response.json()
                 answer = data.get("answer", "No answer found.")
                 sources = data.get("sources", [])
                 
-                # Format response
-                msg = f"<b>Answer:</b>\n{answer}"
-                
+                # Escape before interpolating into HTML: both the answer and
+                # the source names derive from user-supplied documents, and a
+                # single stray "<" made Telegram reject the whole message
+                # with "can't parse entities".
+                msg = f"<b>Answer:</b>\n{html.escape(answer)}"
+
                 if sources:
                     msg += "\n\n<b>Sources:</b>"
                     for src in sources:
-                        msg += f"\n• <i>{src['source']}</i>"
+                        name = html.escape(str(src.get("source", "unknown")))
+                        msg += f"\n• <i>{name}</i>"
                 
                 await update.message.reply_html(msg)
             else:
-                detail = response.json().get('detail', 'No documents uploaded yet')
-                await update.message.reply_text(f"❌ {detail}")
+                await update.message.reply_text(f"❌ {backend_error(response)}")
                 
     except Exception as e:
         logger.error(f"Error handling query: {e}")
@@ -174,7 +216,14 @@ def main():
         logger.error("TELEGRAM_BOT_TOKEN not found in environment variables!")
         return
 
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    # Without concurrent_updates the default processor handles one update at a
+    # time, so a single 60-second document upload blocks every other user.
+    app = (
+        ApplicationBuilder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .concurrent_updates(True)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))

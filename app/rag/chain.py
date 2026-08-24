@@ -2,13 +2,13 @@
 RAG Chain: Retrieval-Augmented Generation
 """
 
-from typing import List, Dict
-from langchain.schema import Document
-from openai import OpenAI
-import httpx
 import os
 import re
+from typing import Dict, List, Optional
 
+import httpx
+from langchain.schema import Document
+from openai import OpenAI
 
 # =========================
 # Language rules
@@ -44,21 +44,40 @@ class RAGChain:
     def __init__(
         self,
         vectorstore,
-        model: str = "gpt-4o-mini",
-        top_k: int = 5,
+        model: str = None,
+        top_k: int = None,
+        temperature: float = None,
+        client: OpenAI = None,
+        api_key: Optional[str] = None,
     ):
-        if not os.getenv("OPENAI_API_KEY"):
-            raise ValueError("OPENAI_API_KEY not found")
-
+        """
+        Args:
+            vectorstore: Vector store with a similarity_search(query, k, filter) method
+            model / top_k / temperature: explicit values; fall back to the
+                MODEL_NAME / TOP_K_RESULTS / TEMPERATURE env vars, then defaults
+            client: injectable OpenAI client (tests); built from api_key otherwise
+            api_key: OpenAI API key, passed explicitly by the app from Settings.
+                pydantic-settings reads .env WITHOUT exporting it into
+                os.environ, so relying on the env var alone made a plain
+                `uvicorn app.main:app` run with only a .env file fail at startup.
+        """
         self.vectorstore = vectorstore
-        self.top_k = int(os.getenv("TOP_K_RESULTS", top_k))
-
-        self.client = OpenAI(
-            http_client=httpx.Client(trust_env=False)
+        self.model = model or os.getenv("MODEL_NAME", "gpt-4o-mini")
+        self.top_k = int(top_k if top_k is not None else os.getenv("TOP_K_RESULTS", 5))
+        self.temperature = float(
+            temperature if temperature is not None else os.getenv("TEMPERATURE", 0)
         )
 
-        self.model = os.getenv("MODEL_NAME", model)
-        self.temperature = float(os.getenv("TEMPERATURE", 0))
+        if client is not None:
+            self.client = client
+        else:
+            key = api_key or os.getenv("OPENAI_API_KEY")
+            if not key:
+                raise ValueError("OPENAI_API_KEY not found")
+            self.client = OpenAI(
+                api_key=key,
+                http_client=httpx.Client(trust_env=False)
+            )
 
     # =========================
     # Build context
@@ -80,7 +99,13 @@ class RAGChain:
     # Main RAG method
     # =========================
     def ask(self, question: str, language: str = "Auto", user_id: str = None) -> Dict:
-        filter_dict = {"user_id": user_id} if user_id else None
+        # A falsy user_id used to mean "no filter", i.e. search every tenant's
+        # documents. No caller wants that, so make it impossible rather than
+        # leaving a cross-tenant read one missing argument away.
+        if not user_id:
+            raise ValueError("user_id is required for retrieval")
+
+        filter_dict = {"user_id": user_id}
         
         docs = self.vectorstore.similarity_search(
             question, k=self.top_k, filter=filter_dict

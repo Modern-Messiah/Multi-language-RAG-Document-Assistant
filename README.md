@@ -1,48 +1,102 @@
 # 🤖 Multi-language RAG Document Assistant
 
-A production-ready, multi-language **Retrieval-Augmented Generation (RAG)** assistant designed for querying multiple documents with accurate source attribution.
+A multi-language **Retrieval-Augmented Generation (RAG)** assistant for querying your own
+documents with source attribution. FastAPI backend, Streamlit web UI, Telegram bot,
+ChromaDB vector store, OpenAI embeddings and chat.
 
 ## Key Features
 
-- **Multi-document Support**: Efficiently handles PDF and TXT file uploads.
-- **Multilingual Intelligence**: Supports questions and answers in English, Russian, Kazakh, French, German, Spanish, Chinese, and Japanese.
-- **Semantic Search**: Powered by **ChromaDB** for fast and relevant document retrieval.
-- **Accurate Attribution**: Every answer comes with citations and text previews from the source documents.
+- **Multi-document Support**: PDF and TXT uploads, with legacy text encodings (cp1251,
+  koi8-r, …) detected automatically.
+- **Multilingual Intelligence**: Questions and answers in English, Russian, Kazakh,
+  French, German, Spanish, Chinese, and Japanese — or `Auto` to mirror the question's
+  language.
+- **Semantic Search**: ChromaDB for fast retrieval, with per-owner metadata filtering.
+- **Source Attribution**: Every answer is accompanied by a separate list of source
+  filenames with 200-character previews. Inline citation markers (`[1]`, `[2]`) are
+  deliberately stripped from the answer text.
+- **Content Deduplication**: Re-uploading the same bytes is a no-op, per owner.
 - **Multiple Interfaces**:
-  - **FastAPI Backend**: Robust and scalable API.
-  - **Streamlit Web UI**: Responsive and user-friendly interface.
+  - **FastAPI Backend**: REST API guarded by a shared-secret header.
+  - **Streamlit Web UI**: Responsive desktop/mobile interface.
   - **Telegram Bot**: Query your documents on the go.
-- **Dockerized**: Easy deployment using Docker and Docker Compose.
+- **Dockerized**: Separate development and production Compose configurations.
 
 ## Architecture Overview
 
-The system follows a modular architecture:
 - **Frontend**: Streamlit application for web-based interaction.
-- **Bot**: Python-based Telegram bot implementation.
+- **Bot**: Telegram bot built on `python-telegram-bot`.
 - **Backend**: FastAPI server orchestrating the RAG pipeline.
-- **RAG Core**: Custom document loading, chunking, and retrieval logic using LangChain-like patterns.
-- **Storage**: ChromaDB for vector embeddings and local filesystem for raw uploads.
+- **RAG Core**: Document loading, chunking, and retrieval built on LangChain
+  (`langchain`, `langchain-community`, `langchain-chroma`) with a custom OpenAI
+  embedding function.
+- **Storage**: ChromaDB for vector embeddings, local filesystem for raw uploads.
 
 ## Quick Start
 
-1. **Clone & Set up Environment**:
+1. **Clone & configure**:
    ```bash
    git clone <repo-url>
-   cp .env.template .env # Fill in your OPENAI_API_KEY
+   cd Multi-language-RAG-Document-Assistant
+   cp .env.template .env
    ```
+   Then edit `.env`:
+   - `OPENAI_API_KEY` — required, the app refuses to start without it.
+   - `BACKEND_API_KEY` — the shared secret every client sends as `X-API-Key`.
+     Replace the placeholder with a long random ASCII string. Leaving it **empty**
+     disables authentication entirely (development only; a warning is logged).
+   - `TELEGRAM_BOT_TOKEN` — required only if you run the bot service.
 
-2. **Run with Docker (Recommended)**:
+2. **Run with Docker**:
    ```bash
-   docker-compose up --build
+   # Development: bind-mounts your working tree and runs the API with --reload
+   docker compose up --build
+
+   # Production: code baked into the image, no reload, detached
+   docker compose -f docker-compose.yml up -d --build
    ```
+   `docker compose up` auto-merges `docker-compose.override.yml`, so the plain command is
+   always the *development* configuration. Pass `-f docker-compose.yml` explicitly to run
+   the production shape.
+
+   Without a valid `TELEGRAM_BOT_TOKEN` the `bot` container exits and restarts in a loop.
+   Start just the web stack instead: `docker compose up backend frontend`.
 
 3. **Access the services**:
    - **Frontend**: `http://localhost:8501`
-   - **API Docs**: `http://localhost:8000/docs`
+   - **API Docs**: `http://localhost:8000/docs` — published on the **loopback interface
+     only**; the frontend and bot reach the API over the internal `rag_net` network.
 
 4. **Telegram Bot**:
-   - Start the bot by sending `/start` to `@MultiLanguageRAGBot`
-   - Use `/upload` to upload documents and `/query` to ask questions.
+   - Send `/start` and pick an answer language.
+   - Attach a PDF or TXT file to index it.
+   - Send any plain text message to ask a question about your documents.
+   - `/clear` deletes your documents, `/help` shows usage.
+
+## Run without Docker
+
+```bash
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+uvicorn app.main:app --reload --port 8000      # backend
+streamlit run frontend/streamlit_app.py        # web UI
+python telegram/bot.py                         # bot
+```
+
+All three read the same `.env` from the repository root.
+
+## Development
+
+```bash
+pip install -r requirements-dev.txt
+ruff check app frontend telegram tests
+pytest -q
+```
+
+The test suite runs **fully offline** — embeddings are replaced with deterministic local
+vectors and the OpenAI chat client is injected, so no test makes a network call.
+`OPENAI_API_KEY` still has to be set to any non-empty value.
 
 
 **Demonstration of work**:
@@ -52,4 +106,5 @@ The system follows a modular architecture:
 
 ![Demonstration of work](app/docs/assets/tg.gif)
 
-For detailed installation and technical details, see [DOCUMENTATION.md](DOCUMENTATION.md).
+For detailed installation, API reference, and configuration, see
+[DOCUMENTATION.md](DOCUMENTATION.md).
