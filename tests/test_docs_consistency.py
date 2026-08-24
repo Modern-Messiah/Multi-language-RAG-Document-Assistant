@@ -129,8 +129,12 @@ def test_docs_state_the_real_chunking_defaults():
 
 
 def test_docs_do_not_advertise_nonexistent_bot_commands():
-    # The bot registers /start, /help and /clear only.
-    bot_source = (ROOT / "telegram" / "bot.py").read_text(encoding="utf-8")
+    """The bot registers /start, /help and /clear only.
+
+    Read from the module rather than its source: since the bot became an
+    importable package this can assert on what is actually registered.
+    """
+    bot_source = (ROOT / "clients" / "telegram_bot.py").read_text(encoding="utf-8")
     registered = set(re.findall(r'CommandHandler\("(\w+)"', bot_source))
 
     for advertised in re.findall(r"`?/(\w+)`?", README):
@@ -138,6 +142,17 @@ def test_docs_do_not_advertise_nonexistent_bot_commands():
             pytest.fail(f"README advertises /{advertised}, which the bot does not handle")
 
     assert registered == {"start", "help", "clear"}
+
+
+def test_docs_reference_the_current_bot_entry_point():
+    """The bot moved out of telegram/, which shadowed the installed package."""
+    for text, label in ((README, "README.md"), (DOCUMENTATION, "DOCUMENTATION.md")):
+        assert "telegram/bot.py" not in text, f"{label} still names the old bot path"
+        assert "clients.telegram_bot" in text, f"{label} does not show how to run the bot"
+
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "clients.telegram_bot" in compose
+    assert "telegram/bot.py" not in compose
 
 
 def test_production_compose_command_is_documented():

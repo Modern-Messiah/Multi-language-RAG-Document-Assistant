@@ -47,7 +47,7 @@ services:
 
   bot:
     build: .
-    command: python telegram/bot.py
+    command: python -m clients.telegram_bot
     environment:
       - BACKEND_URL=http://backend:8000
     env_file:

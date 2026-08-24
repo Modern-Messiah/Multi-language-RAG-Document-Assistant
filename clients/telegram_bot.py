@@ -14,6 +14,14 @@ from telegram.ext import (
     filters,
 )
 
+from clients.backend import (
+    AUTO_LANGUAGE,
+    SUPPORTED_LANGUAGES,
+    api_headers,
+    backend_url,
+    error_from_response,
+)
+
 # Load environment variables
 load_dotenv()
 
@@ -26,16 +34,14 @@ logger = logging.getLogger(__name__)
 
 # Config
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+BACKEND_URL = backend_url()
 
 # Shared secret for the backend; empty means the backend runs with auth
 # disabled (development mode) and the header is simply ignored.
-BACKEND_HEADERS = {"X-API-Key": os.getenv("BACKEND_API_KEY", "")}
+BACKEND_HEADERS = api_headers()
 
-LANGUAGES = [
-    "Auto", "English", "Русский", "Қазақша", 
-    "Français", "Deutsch", "Español", "中文", "日本語"
-]
+# Auto plus every language the chain actually has a rule for.
+LANGUAGES = list(SUPPORTED_LANGUAGES)
 
 # Copying .env.template without editing it leaves these in place, and because
 # they are non-empty the bot used to sail past its own "token missing" check
@@ -47,25 +53,18 @@ PLACEHOLDER_TOKENS = frozenset({
 
 
 def backend_error(response) -> str:
-    """Extract a safe, human-readable reason from a failed backend response.
+    """Describe a failed backend response, logging operator-only failures.
 
-    Two things this must not do: raise (response.json() throws on a non-JSON
-    body such as a proxy's HTML 502 page or an empty 500), and relay a
-    configuration problem to an end user who cannot act on it.
+    The wording lives in clients.backend so the Streamlit UI says the same
+    thing; the logging is the bot's own, since only the bot has an operator
+    reading its log.
     """
     if response.status_code in (401, 403):
-        # "Invalid or missing API key" is for the operator, not the user.
         logger.error(
             "Backend rejected the bot's API key (HTTP %s) - check BACKEND_API_KEY",
             response.status_code,
         )
-        return "I am not configured correctly. Please contact the operator."
-
-    try:
-        detail = response.json().get("detail")
-    except ValueError:
-        detail = None
-    return str(detail) if detail else f"Backend error (HTTP {response.status_code})"
+    return error_from_response(response)
 
 
 def get_language_keyboard():
@@ -190,7 +189,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Treat as query
-    language = context.user_data.get("language", "Auto")
+    language = context.user_data.get("language", AUTO_LANGUAGE)
     
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:

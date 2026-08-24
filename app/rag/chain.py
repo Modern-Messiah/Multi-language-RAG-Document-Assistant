@@ -10,19 +10,11 @@ import httpx
 from langchain.schema import Document
 from openai import OpenAI
 
-# =========================
-# Language rules
-# =========================
-LANG_RULES = {
-    "English": "Answer strictly in English.",
-    "Русский": "Отвечай строго на русском языке.",
-    "Қазақша": "Жауапты қатаң түрде қазақ тілінде бер.",
-    "Français": "Réponds strictement en français.",
-    "Deutsch": "Antworte ausschließlich auf Deutsch.",
-    "Español": "Responde estrictamente en español.",
-    "中文": "请严格使用简体中文回答。",
-    "日本語": "必ず日本語で回答してください。"
-}
+from app.rag.languages import AUTO_LANGUAGE, LANG_RULES, rule_for
+
+# LANG_RULES is re-exported: it lived here first, and the clients now read the
+# same table from app.rag.languages instead of keeping their own copies.
+__all__ = ["LANG_RULES", "RAGChain", "SYSTEM_PROMPT"]
 
 
 # =========================
@@ -98,7 +90,9 @@ class RAGChain:
     # =========================
     # Main RAG method
     # =========================
-    def ask(self, question: str, language: str = "Auto", user_id: str = None) -> Dict:
+    def ask(
+        self, question: str, language: str = AUTO_LANGUAGE, user_id: str = None
+    ) -> Dict:
         # A falsy user_id used to mean "no filter", i.e. search every tenant's
         # documents. No caller wants that, so make it impossible rather than
         # leaving a cross-tenant read one missing argument away.
@@ -119,16 +113,7 @@ class RAGChain:
 
         context = self._build_context(docs)
 
-        if language == "Auto":
-            lang_rule = (
-                "Answer in the same language as the user's question. "
-                "If the context is in another language, translate the answer."
-            )
-        else:
-            lang_rule = LANG_RULES.get(
-                language,
-                "Answer in the same language as the user's question."
-            )
+        lang_rule = rule_for(language)
 
         system_prompt = f"""
 {SYSTEM_PROMPT}
