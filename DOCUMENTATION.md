@@ -7,8 +7,7 @@ A RAG (Retrieval-Augmented Generation) assistant that lets users query their own
 
 - **Multi-document Support**: specialized loaders for PDF and TXT files, with charset
   detection for legacy text encodings.
-- **Intelligent Chunking**: overlapping chunks to preserve context (1000 characters with
-  200 characters of overlap by default; configurable via `CHUNK_SIZE` / `CHUNK_OVERLAP`).
+- **Intelligent Chunking**: overlapping chunks preserve context — 1000 characters with 200 characters of overlap by default, configurable via `CHUNK_SIZE` / `CHUNK_OVERLAP`.
 - **Multilingual Support**: explicit prompt rules for English, Russian, Kazakh, French,
   German, Spanish, Chinese, and Japanese, plus an `Auto` mode that mirrors the question.
 - **RAG Architecture**: ChromaDB for vector storage, OpenAI for embeddings and generation.
