@@ -1,0 +1,25 @@
+# Development overrides, auto-merged by `docker compose up`:
+# live code via bind mounts and auto-reload for the backend.
+# Skip this file for a production-shaped run:
+#   docker compose -f docker-compose.yml up -d
+services:
+  backend:
+    # --reload-dir scopes the watcher to the backend package. The default is
+    # the whole working directory, which the bind mount below re-populates with
+    # everything .dockerignore keeps out of the image — including a local
+    # .venv of several thousand files.
+    command: >
+      uvicorn app.main:app --host 0.0.0.0 --port 8000
+      --reload --reload-dir app
+    volumes:
+      - .:/app
+      - data_uploads:/app/data/uploads
+      - data_chroma:/app/data/chroma_db
+
+  frontend:
+    volumes:
+      - .:/app
+
+  bot:
+    volumes:
+      - .:/app
