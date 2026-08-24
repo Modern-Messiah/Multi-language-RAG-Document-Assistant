@@ -53,10 +53,17 @@ graph TD
     -   Handles file uploads and the question/answer interface.
     -   Communicates with the backend over REST.
 
-2.  **Telegram Bot (`telegram/`)**:
-    -   Built with `python-telegram-bot`.
-    -   Supports document uploads (PDF/TXT) and text queries.
-    -   Keeps the chosen answer language in per-user state.
+2.  **Clients (`clients/`)**:
+    -   `backend.py`: configuration and the error wording both clients share.
+        They used to keep their own diverging copies of it.
+    -   `telegram_bot.py`: the Telegram bot, built with `python-telegram-bot`.
+        Supports document uploads (PDF/TXT) and text queries, and keeps the
+        chosen answer language in per-user state. Run it with
+        `python -m clients.telegram_bot`.
+    -   The bot lived in `telegram/` until Stage 3. That name collides with the
+        installed `python-telegram-bot` package - harmless only because the
+        directory had no `__init__.py`, and already enough to make two ruff
+        versions sort its imports differently.
 
 3.  **Backend (`app/`)**:
     -   **API (`main.py`)**: exposes `/upload`, `/query`, `/clear`, and `/health`.
@@ -118,14 +125,14 @@ graph TD
 ```bash
 uvicorn app.main:app --reload --port 8000      # backend
 streamlit run frontend/streamlit_app.py        # web UI
-python telegram/bot.py                         # bot
+python -m clients.telegram_bot                 # bot
 ```
 
 ### Development
 
 ```bash
 pip install -r requirements-dev.txt
-ruff check app frontend telegram tests
+ruff check app frontend clients tests
 pytest -q
 ```
 
@@ -334,7 +341,7 @@ variable of the same name, read from `.env` or the process environment.
 | `COLLECTION_NAME` | ChromaDB collection name. | `documents` |
 | `UPLOAD_DIR` | Where raw uploads are stored. | `data/uploads` |
 | `MAX_FILE_SIZE` | Maximum accepted upload, in bytes. | `31457280` (30 MB) |
-| `TELEGRAM_BOT_TOKEN` | Required by the bot only; read directly by `telegram/bot.py`. | - |
+| `TELEGRAM_BOT_TOKEN` | Required by the bot only; read directly by `clients/telegram_bot.py`. | - |
 | `BACKEND_URL` | Backend base URL used by the frontend and bot. Compose overrides it to `http://backend:8000`. | `http://localhost:8000` |
 
 Invalid combinations are rejected at startup rather than at first use - for example
@@ -359,6 +366,7 @@ subsequent search. To switch models, delete the collection directory
 │   ├── config.py               # pydantic-settings Settings (single source of truth)
 │   ├── models/                 # Pydantic models (QueryRequest, QueryResponse)
 │   ├── rag/                    # RAG core logic
+│   │   ├── languages.py        # The one language table both clients derive from
 │   │   ├── document_loader.py  # File parsing (PDF/TXT) + charset detection
 │   │   ├── text_splitter.py    # Recursive chunking
 │   │   ├── embeddings.py       # Vector DB management (ChromaDB)
@@ -366,8 +374,9 @@ subsequent search. To switch models, delete the collection directory
 │   └── docs/assets/            # Documentation assets (GIFs, images)
 ├── frontend/
 │   └── streamlit_app.py        # Streamlit UI
-├── telegram/
-│   └── bot.py                  # Telegram bot
+├── clients/
+│   ├── backend.py              # Config + error wording shared by both clients
+│   └── telegram_bot.py         # Telegram bot
 ├── tests/                      # Offline test suite (pytest)
 │   ├── conftest.py             # Fake embeddings + isolated app fixtures
 │   ├── test_api.py             # Auth, validation, dedup, clear, isolation
@@ -400,7 +409,7 @@ with `concurrency` cancelling superseded runs:
   committed - a dependency change without a regenerated lock cannot merge.
 - **test**: installs `requirements-dev.lock` with `--require-hashes` on Python
   3.10 (the same transitive versions the image ships), runs
-  `ruff check app frontend telegram tests`, then `pytest -q` with a dummy
+  `ruff check app frontend clients tests`, then `pytest -q` with a dummy
   `OPENAI_API_KEY`.
 - **docker**: builds the image, prints its size, asserts no compiler is present
   in the runtime stage, then starts the container and probes `/health` - a build

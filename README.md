@@ -81,7 +81,7 @@ pip install -r requirements.txt
 
 uvicorn app.main:app --reload --port 8000      # backend
 streamlit run frontend/streamlit_app.py        # web UI
-python telegram/bot.py                         # bot
+python -m clients.telegram_bot                 # bot
 ```
 
 All three read the same `.env` from the repository root.
@@ -90,7 +90,7 @@ All three read the same `.env` from the repository root.
 
 ```bash
 pip install -r requirements-dev.txt
-ruff check app frontend telegram tests
+ruff check app frontend clients tests
 pytest -q
 ```
 

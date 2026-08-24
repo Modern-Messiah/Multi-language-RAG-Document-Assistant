@@ -1,11 +1,26 @@
 import hashlib
 import html
-import os
+import sys
 import uuid
+from pathlib import Path
 
 import requests
 import streamlit as st
 from dotenv import load_dotenv
+
+# `streamlit run frontend/streamlit_app.py` puts frontend/ on sys.path, not the
+# repository root, so the shared client package is not importable without this.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from clients.backend import (  # noqa: E402  (must follow the sys.path fix)
+    SUPPORTED_LANGUAGES,
+    api_headers,
+    backend_url,
+    error_from_response,
+    max_file_mb,
+)
 
 # Read .env like the bot and the backend do. Without this, a local
 # `streamlit run` sent an empty X-API-Key and every request came back 401
@@ -13,30 +28,17 @@ from dotenv import load_dotenv
 # through env_file, where load_dotenv is a harmless no-op.
 load_dotenv()
 
-API_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
+API_URL = backend_url()
 
 # Mirrors the backend's MAX_FILE_SIZE so the UI never advertises a limit the
 # API will not honour (the two read the same .env).
-MAX_FILE_MB = int(os.getenv("MAX_FILE_SIZE", 30 * 1024 * 1024)) // (1024 * 1024)
+MAX_FILE_MB = max_file_mb()
 
 # Shared secret for the backend; empty means the backend runs with auth
 # disabled (development mode) and the header is simply ignored.
-HEADERS = {"X-API-Key": os.getenv("BACKEND_API_KEY", "")}
+HEADERS = api_headers()
 
-
-def backend_error(response) -> str:
-    """Human-readable reason from a failed backend response.
-
-    Never dump response.text into the UI: a 422 body is a nested pydantic
-    error blob, and .json() raises outright on a proxy's HTML error page.
-    """
-    try:
-        detail = response.json().get("detail")
-    except ValueError:
-        detail = None
-    if isinstance(detail, list):  # pydantic validation errors
-        detail = "; ".join(str(item.get("msg", item)) for item in detail)
-    return str(detail) if detail else f"Backend error (HTTP {response.status_code})"
+backend_error = error_from_response
 
 # =========================
 # Page config
@@ -239,16 +241,22 @@ with st.sidebar:
 
     st.header("⚙️ Settings")
 
+    # Labels decorate the values; the values themselves come from the backend's
+    # language table, so the picker cannot offer something the chain ignores.
+    LANG_FLAGS = {
+        "Auto": "🌐",
+        "English": "🇬🇧",
+        "Русский": "🇷🇺",
+        "Қазақша": "🇰🇿",
+        "Français": "🇫🇷",
+        "Deutsch": "🇩🇪",
+        "Español": "🇪🇸",
+        "日本語": "🇯🇵",
+        "中文": "🇨🇳",
+    }
     LANG_OPTIONS = {
-        "Auto 🌐": "Auto",
-        "English 🇬🇧": "English",
-        "Русский 🇷🇺": "Русский",
-        "Қазақша 🇰🇿": "Қазақша",
-        "Français 🇫🇷": "Français",
-        "Deutsch 🇩🇪": "Deutsch",
-        "Español 🇪🇸": "Español",
-        "日本語 🇯🇵": "日本語",
-        "中文 🇨🇳": "中文",
+        f"{name} {LANG_FLAGS.get(name, '')}".strip(): name
+        for name in SUPPORTED_LANGUAGES
     }
 
     language_label = st.radio(
