@@ -106,12 +106,63 @@ class EmbeddingsManager:
             f"model={embedding_model}, dir={persist_directory}"
         )
 
+    # Recorded in the collection's metadata so a later EMBEDDING_MODEL change
+    # is caught at startup instead of corrupting search results.
+    MODEL_METADATA_KEY = "embedding_model"
+
     # =========================
     # Collection lifecycle
     # =========================
+    def _assert_embedding_model_matches(self, collection_name: str) -> None:
+        metadata = self.collection.metadata or {}
+        recorded = metadata.get(self.MODEL_METADATA_KEY)
+
+        if recorded == self.embedding_model_name:
+            return
+
+        if recorded is None:
+            # Either brand new, or created before this check existed: record
+            # the current model rather than guess at an older one.
+            if self.collection.count():
+                logger.warning(
+                    f"⚠️ Collection '{collection_name}' has no recorded "
+                    f"embedding model; assuming '{self.embedding_model_name}'"
+                )
+            try:
+                self.collection.modify(
+                    metadata={
+                        **metadata,
+                        self.MODEL_METADATA_KEY: self.embedding_model_name,
+                    }
+                )
+            except Exception:
+                logger.warning("Could not record the embedding model")
+            return
+
+        raise ValueError(
+            f"Collection '{collection_name}' was built with embedding model "
+            f"'{recorded}', but EMBEDDING_MODEL is now "
+            f"'{self.embedding_model_name}'. Vectors from different models are "
+            f"not comparable. Either restore EMBEDDING_MODEL={recorded} or "
+            f"delete the collection and re-index "
+            f"(remove {self.persist_directory})."
+        )
+
     def get_vectorstore(self, collection_name: str = "documents") -> Chroma:
-        """Open (get-or-create) a collection and bind the langchain wrapper."""
+        """Open (get-or-create) a collection and bind the langchain wrapper.
+
+        Refuses to open a collection that was built with a different embedding
+        model. Vectors from two models are not comparable, and the dimensions
+        usually differ outright (1536 vs 3072 for text-embedding-3-small vs
+        -large), so silently mixing them corrupts every subsequent search.
+        """
+        # Deliberately no metadata= here: in chromadb 0.4.24
+        # get_or_create_collection OVERWRITES the metadata of an existing
+        # collection, which would stamp the new model over the recorded one
+        # and defeat the very check below.
         self.collection = self.client.get_or_create_collection(collection_name)
+        self._assert_embedding_model_matches(collection_name)
+
         self.vectorstore = Chroma(
             client=self.client,
             collection_name=collection_name,

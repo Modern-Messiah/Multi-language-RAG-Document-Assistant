@@ -1,3 +1,4 @@
+import hashlib
 import html
 import os
 import uuid
@@ -80,16 +81,14 @@ input, textarea, button {
 
 section[data-testid="stSidebar"] * {
     font-size: 20px;
-    section[data-testid="stFileUploader"] small {
-    opacity: 0.25 !important;
-    font-size: 11px !important;
-    pointer-events: none;
 }
 
+/* Streamlit's uploader prints its own "Limit 200MB per file" caption, which
+   contradicts the backend's MAX_FILE_SIZE. Hide it; the label above states
+   the real limit. (This rule was previously nested inside the block above,
+   which made it — and the sidebar font-size — invalid CSS.) */
 section[data-testid="stFileUploader"] small {
     display: none !important;
-}
-
 }
 
 [data-testid="stCaptionContainer"] p {
@@ -188,15 +187,32 @@ with st.sidebar:
 
     if uploaded_files:
         for file in uploaded_files:
-            file_key = (file.name, file.size)
+            payload = file.getvalue()
+            # Key on the content, not (name, size): two different notes.txt of
+            # the same length would otherwise collide and the second would be
+            # silently skipped.
+            file_key = (file.name, hashlib.sha256(payload).hexdigest()[:16])
             if file_key in indexed_files or file_key in failed_files:
+                continue
+
+            # Reject oversize files here rather than spending two minutes
+            # uploading something the backend is going to refuse.
+            if len(payload) > MAX_FILE_MB * 1024 * 1024:
+                failed_files[file_key] = (
+                    f"too large ({len(payload) / (1024 * 1024):.1f} MB); "
+                    f"the limit is {MAX_FILE_MB} MB"
+                )
+                continue
+
+            if not payload:
+                failed_files[file_key] = "the file is empty"
                 continue
 
             with st.spinner(f"Processing {file.name}..."):
                 try:
                     response = requests.post(
                         f"{API_URL}/upload",
-                        files={"file": file},
+                        files={"file": (file.name, payload, file.type)},
                         params={"user_id": USER_ID},
                         headers=HEADERS,
                         timeout=120
@@ -216,7 +232,7 @@ with st.sidebar:
 
     # Failures persist across reruns, so report them from state rather than
     # only in the run that produced them.
-    for (name, _size), reason in failed_files.items():
+    for (name, _digest), reason in failed_files.items():
         st.error(f"{name}: {reason}")
 
     st.divider()
