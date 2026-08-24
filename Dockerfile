@@ -13,15 +13,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
+# Install Python dependencies first so a code change does not reinstall them
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application code
-COPY . .
+# Create the unprivileged user before copying the code, so COPY can set the
+# ownership directly. A `chown -R` after COPY would duplicate the whole tree
+# into an extra image layer.
+RUN useradd --create-home appuser
 
-# Create necessary directories
-RUN mkdir -p data/uploads data/chroma_db
+COPY --chown=appuser:appuser . .
+
+# Named volumes mounted on data/ inherit this ownership on first use
+RUN mkdir -p data/uploads data/chroma_db \
+    && chown -R appuser:appuser data
+USER appuser
 
 # Expose ports (FastAPI=8000, Streamlit=8501)
 EXPOSE 8000 8501

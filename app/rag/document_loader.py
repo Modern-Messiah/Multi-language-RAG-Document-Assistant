@@ -3,12 +3,13 @@ Document Loader for RAG Assistant
 Supports PDF and TXT files with metadata extraction
 """
 
-from charset_normalizer import from_bytes
-from langchain_community.document_loaders import PyPDFLoader
+import logging
 from pathlib import Path
 from typing import List
+
+from charset_normalizer import from_bytes
 from langchain.schema import Document
-import logging
+from langchain_community.document_loaders import PyPDFLoader
 
 logger = logging.getLogger(__name__)
 
@@ -247,19 +248,19 @@ This system is built with LangChain, ChromaDB, and FastAPI.
         
         docs = loader.load_document(test_txt_path)
         
-        print(f"✅ Successfully loaded document")
+        print("✅ Successfully loaded document")
         print(f"   Source: {docs[0].metadata['source']}")
         print(f"   Type: {docs[0].metadata['type']}")
         print(f"   Characters: {docs[0].metadata['char_count']}")
         
         # Get document info
         info = DocumentLoader.get_document_info(docs)
-        print(f"\n📊 Document Info:")
+        print("\n📊 Document Info:")
         for key, value in info.items():
             print(f"   {key}: {value}")
         
         # Show content preview
-        print(f"\n📄 Content Preview (first 200 chars):")
+        print("\n📄 Content Preview (first 200 chars):")
         print(f"   {docs[0].page_content[:200]}...")
         
         print("\n" + "="*60)

@@ -3,6 +3,13 @@ venv/
 __pycache__/
 *.pyc
 .git/
+.github/
 .env
+.pytest_cache/
+.ruff_cache/
+tests/
+*.md
+# 4.3 MB of README demo GIFs that the running services never read
+app/docs/assets/
 data/chroma_db/*
 data/uploads/*
