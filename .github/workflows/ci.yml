@@ -11,7 +11,44 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Pinned so a uv release cannot change how the lock resolves.
+  UV_VERSION: "0.12.5"
+
 jobs:
+  lock:
+    name: Lock files are current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install uv
+        run: pip install "uv==${UV_VERSION}"
+
+      # Recompiling INTO the existing files is deliberate: uv reads them as
+      # version preferences, so an unrelated upstream release cannot make this
+      # job fail. Only an edit to requirements*.txt without a regenerated lock
+      # produces a diff.
+      - name: Recompile the locks
+        run: |
+          uv pip compile requirements.txt \
+            --python-platform linux --python-version 3.10 \
+            --generate-hashes --output-file requirements.lock --quiet
+          uv pip compile requirements.txt requirements-dev.txt \
+            --python-platform linux --python-version 3.10 \
+            --generate-hashes --output-file requirements-dev.lock --quiet
+
+      - name: Fail if a lock is stale
+        run: |
+          if ! git diff --exit-code -- requirements.lock requirements-dev.lock; then
+            echo "::error::A lock file is out of date. Regenerate it with the commands in DOCUMENTATION.md and commit the result."
+            exit 1
+          fi
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -22,11 +59,13 @@ jobs:
           python-version: "3.10"
           cache: pip
           cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
+            requirements.lock
+            requirements-dev.lock
 
       - name: Install dependencies
-        run: pip install -r requirements.txt -r requirements-dev.txt
+        # The lock, not requirements.txt: the test run must exercise the same
+        # transitive versions the image ships.
+        run: pip install --require-hashes -r requirements-dev.lock
 
       - name: Lint (ruff)
         run: ruff check app frontend telegram tests
@@ -43,6 +82,21 @@ jobs:
 
       - name: Build image
         run: docker build -t rag-assistant:ci .
+
+      - name: Report image size
+        # The multi-stage split exists to keep the toolchain out of the runtime
+        # image; print the number so a regression is visible in the log.
+        run: |
+          docker image inspect rag-assistant:ci --format 'image bytes {{.Size}}'
+
+      - name: No build toolchain in the runtime image
+        # Guards the split itself: gcc reappearing means the stages got merged.
+        run: |
+          if docker run --rm --entrypoint sh rag-assistant:ci -c 'command -v gcc'; then
+            echo "::error::gcc is present in the runtime image — the build stage leaked into it"
+            exit 1
+          fi
+          echo "runtime image has no compiler, as intended"
 
       - name: Smoke test the image
         # Build success alone never proved the app could start; import the

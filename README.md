@@ -94,6 +94,12 @@ ruff check app frontend telegram tests
 pytest -q
 ```
 
+Dependencies are declared in `requirements*.txt` and resolved into
+`requirements*.lock` (every transitive package pinned and hashed), which is what
+the Docker image and CI install. The locks target linux / CPython 3.10, so
+install from `requirements.txt` on a Windows or macOS machine. See
+[DOCUMENTATION.md](DOCUMENTATION.md) for how to regenerate them.
+
 The test suite runs **fully offline** — embeddings are replaced with deterministic local
 vectors and the OpenAI chat client is injected, so no test makes a network call.
 `OPENAI_API_KEY` still has to be set to any non-empty value.

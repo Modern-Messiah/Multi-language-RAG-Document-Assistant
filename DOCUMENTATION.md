@@ -129,6 +129,38 @@ ruff check app frontend telegram tests
 pytest -q
 ```
 
+### Dependencies and the lock files
+
+`requirements.txt` and `requirements-dev.txt` are the **input specs** — they pin
+the direct dependencies only. `requirements.lock` and `requirements-dev.lock` are
+the **fully resolved** sets: every transitive package pinned, with SHA-256 hashes.
+
+Why both: pinning only the 17 direct dependencies left ~130 transitive ones
+floating, and that is exactly how an incompatible `posthog` release started
+logging an error on every startup. The Docker image and CI install from the
+locks, so a build is reproducible and `pip` refuses any artifact whose hash does
+not match.
+
+The locks are resolved **for linux / CPython 3.10** — the image and CI. On a
+Windows or macOS development machine, install from `requirements.txt` instead;
+the hashes in the lock refer to Linux wheels.
+
+To change a dependency: edit the input spec, then regenerate **both** locks and
+commit them together.
+
+```bash
+pip install uv==0.12.5
+
+uv pip compile requirements.txt   --python-platform linux --python-version 3.10   --generate-hashes --output-file requirements.lock
+
+uv pip compile requirements.txt requirements-dev.txt   --python-platform linux --python-version 3.10   --generate-hashes --output-file requirements-dev.lock
+```
+
+Compiling *into* the existing files is deliberate: uv reads them as version
+preferences, so a new upstream release does not silently move an unrelated pin.
+Forgetting to regenerate is caught twice — by `tests/test_lockfile.py` locally
+and by the `lock` job in CI, which recompiles and fails on any diff.
+
 The suite is **offline by construction**: an autouse fixture replaces OpenAI embedding
 calls with deterministic local vectors, and `RAGChain` takes an injected client, so no test
 reaches the network. `OPENAI_API_KEY` must still be set to any non-empty value.
@@ -340,15 +372,24 @@ subsequent search. To switch models, delete the collection directory
 ├── docker-compose.override.yml # Development overrides (auto-merged)
 ├── Dockerfile                  # Shared image for all three services
 ├── pyproject.toml              # ruff + pytest configuration
-├── requirements.txt            # Runtime dependencies
-├── requirements-dev.txt        # Development dependencies
+├── requirements.txt            # Runtime dependencies (input spec)
+├── requirements-dev.txt        # Development dependencies (input spec)
+├── requirements.lock           # Resolved runtime set, hashed (linux/cp310)
+├── requirements-dev.lock       # Resolved runtime + dev set, hashed
 └── .env.template               # Documented environment template
 ```
 
 ## Continuous Integration
 
-`.github/workflows/ci.yml` runs on every push and pull request:
-- **test**: installs `requirements.txt` + `requirements-dev.txt` on Python 3.10, runs
+`.github/workflows/ci.yml` runs on pushes to `main` and on every pull request,
+with `concurrency` cancelling superseded runs:
+
+- **lock**: recompiles both lock files and fails if either differs from what is
+  committed — a dependency change without a regenerated lock cannot merge.
+- **test**: installs `requirements-dev.lock` with `--require-hashes` on Python
+  3.10 (the same transitive versions the image ships), runs
   `ruff check app frontend telegram tests`, then `pytest -q` with a dummy
   `OPENAI_API_KEY`.
-- **docker**: builds the image to catch Dockerfile regressions.
+- **docker**: builds the image, prints its size, asserts no compiler is present
+  in the runtime stage, then starts the container and probes `/health` — a build
+  that succeeds but cannot boot used to pass unnoticed.
