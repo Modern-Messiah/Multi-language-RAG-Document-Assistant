@@ -78,7 +78,7 @@ def require_api_key(
     if not expected:
         return  # auth disabled (development mode)
     # Compare bytes: secrets.compare_digest raises TypeError on str operands
-    # containing non-ASCII, and uvicorn decodes headers as latin-1 — so a
+    # containing non-ASCII, and uvicorn decodes headers as latin-1 - so a
     # non-ASCII BACKEND_API_KEY turned every request into a 500.
     if not key or not secrets.compare_digest(
         key.encode("utf-8"), expected.encode("utf-8")
@@ -103,11 +103,11 @@ async def lifespan(app: FastAPI):
 
     if not settings.backend_api_key:
         logger.warning(
-            "BACKEND_API_KEY is not set — API authentication is DISABLED"
+            "BACKEND_API_KEY is not set - API authentication is DISABLED"
         )
     elif settings.backend_api_key in PLACEHOLDER_API_KEYS:
         logger.warning(
-            "BACKEND_API_KEY is still the .env.template placeholder — "
+            "BACKEND_API_KEY is still the .env.template placeholder - "
             "authentication is effectively public. Set a random secret."
         )
 
@@ -210,7 +210,7 @@ async def upload_document(
 
     file_hash = hashlib.sha256(contents).hexdigest()[:16]
 
-    # ♻️ Identical content already indexed for this owner — skip re-embedding
+    # ♻️ Identical content already indexed for this owner - skip re-embedding
     try:
         already_indexed = state.embeddings.has_file_hash(file_hash, user_id)
     except Exception:
@@ -310,7 +310,7 @@ async def clear_documents(request: Request, user_id: str = USER_ID_QUERY):
         raise HTTPException(status_code=500, detail="Failed to clear documents")
 
     # Drop the raw uploads too. Deleting only the vectors left every file the
-    # user ever sent on disk forever — unbounded volume growth, and "cleared"
+    # user ever sent on disk forever - unbounded volume growth, and "cleared"
     # documents that are still sitting there.
     # user_id is validated ([A-Za-z0-9_-]{1,64}), so it cannot escape upload_dir.
     owner_dir = settings.upload_dir / user_id

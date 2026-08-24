@@ -1,4 +1,4 @@
-# 📄 Multi-language RAG Document Assistant — Technical Documentation
+# 📄 Multi-language RAG Document Assistant - Technical Documentation
 
 A RAG (Retrieval-Augmented Generation) assistant that lets users query their own documents
 (PDF, TXT) in multiple languages with source attribution.
@@ -7,7 +7,7 @@ A RAG (Retrieval-Augmented Generation) assistant that lets users query their own
 
 - **Multi-document Support**: specialized loaders for PDF and TXT files, with charset
   detection for legacy text encodings.
-- **Intelligent Chunking**: overlapping chunks preserve context — 1000 characters with 200 characters of overlap by default, configurable via `CHUNK_SIZE` / `CHUNK_OVERLAP`.
+- **Intelligent Chunking**: overlapping chunks preserve context - 1000 characters with 200 characters of overlap by default, configurable via `CHUNK_SIZE` / `CHUNK_OVERLAP`.
 - **Multilingual Support**: explicit prompt rules for English, Russian, Kazakh, French,
   German, Spanish, Chinese, and Japanese, plus an `Auto` mode that mirrors the question.
 - **RAG Architecture**: ChromaDB for vector storage, OpenAI for embeddings and generation.
@@ -75,7 +75,7 @@ graph TD
 
 ### Prerequisites
 
-- Python 3.10 — the version used by the Docker image, CI, and the ruff target.
+- Python 3.10 - the version used by the Docker image, CI, and the ruff target.
 - An OpenAI API key.
 - A Telegram bot token (only if you run the bot).
 
@@ -131,7 +131,7 @@ pytest -q
 
 ### Dependencies and the lock files
 
-`requirements.txt` and `requirements-dev.txt` are the **input specs** — they pin
+`requirements.txt` and `requirements-dev.txt` are the **input specs** - they pin
 the direct dependencies only. `requirements.lock` and `requirements-dev.lock` are
 the **fully resolved** sets: every transitive package pinned, with SHA-256 hashes.
 
@@ -141,7 +141,7 @@ logging an error on every startup. The Docker image and CI install from the
 locks, so a build is reproducible and `pip` refuses any artifact whose hash does
 not match.
 
-The locks are resolved **for linux / CPython 3.10** — the image and CI. On a
+The locks are resolved **for linux / CPython 3.10** - the image and CI. On a
 Windows or macOS development machine, install from `requirements.txt` instead;
 the hashes in the lock refer to Linux wheels.
 
@@ -151,15 +151,27 @@ commit them together.
 ```bash
 pip install uv==0.12.5
 
-uv pip compile requirements.txt   --python-platform linux --python-version 3.10   --generate-hashes --output-file requirements.lock
+uv pip compile requirements.txt \
+  --python-platform linux --python-version 3.10 \
+  --generate-hashes --no-strip-extras \
+  --output-file requirements.lock
 
-uv pip compile requirements.txt requirements-dev.txt   --python-platform linux --python-version 3.10   --generate-hashes --output-file requirements-dev.lock
+uv pip compile requirements.txt requirements-dev.txt \
+  --python-platform linux --python-version 3.10 \
+  --generate-hashes --no-strip-extras \
+  --output-file requirements-dev.lock
 ```
 
 Compiling *into* the existing files is deliberate: uv reads them as version
 preferences, so a new upstream release does not silently move an unrelated pin.
-Forgetting to regenerate is caught twice — by `tests/test_lockfile.py` locally
+Forgetting to regenerate is caught twice - by `tests/test_lockfile.py` locally
 and by the `lock` job in CI, which recompiles and fails on any diff.
+
+`--no-strip-extras` is not optional. uv strips extras by default, which records
+`uvicorn==0.29.0` instead of `uvicorn[standard]==0.29.0`. chromadb then asks pip
+for `uvicorn[standard]`, pip treats the extra-decorated name as a separate
+unpinned requirement, and `--require-hashes` refuses the whole file. The Docker
+build is what caught this; no local check could.
 
 The suite is **offline by construction**: an autouse fixture replaces OpenAI embedding
 calls with deterministic local vectors, and `RAGChain` takes an injected client, so no test
@@ -173,18 +185,18 @@ directory.
 `docker-compose.yml`, so the two modes are:
 
 ```bash
-# Development — bind-mounts the working tree, runs the API with --reload
+# Development - bind-mounts the working tree, runs the API with --reload
 docker compose up --build
 
-# Production — code baked into the image, detached, no override
+# Production - code baked into the image, detached, no override
 docker compose -f docker-compose.yml up -d --build
 ```
 
 This starts:
-- **Backend API**: `http://127.0.0.1:8000` — published on the **loopback interface only**
+- **Backend API**: `http://127.0.0.1:8000` - published on the **loopback interface only**
   (`127.0.0.1:8000:8000`). Other hosts reach it only through the frontend/bot on the
   internal `rag_net` network, or through a reverse proxy you add yourself.
-- **Streamlit Frontend**: `http://localhost:8501` — published on all interfaces.
+- **Streamlit Frontend**: `http://localhost:8501` - published on all interfaces.
 - **Telegram Bot**: connects to Telegram over outbound polling.
 
 The frontend and bot wait for the backend's `depends_on: service_healthy` gate, which is
@@ -192,7 +204,7 @@ driven by the `/health` probe. Both receive `BACKEND_URL=http://backend:8000` fr
 `environment:` block, which takes precedence over any `BACKEND_URL` in `.env`; every other
 variable arrives via `env_file: .env`.
 
-The `bot` service requires a valid `TELEGRAM_BOT_TOKEN` — without one the container exits
+The `bot` service requires a valid `TELEGRAM_BOT_TOKEN` - without one the container exits
 and restarts continuously. To run without it: `docker compose up backend frontend`.
 
 Uploads and the vector database live in the named volumes `data_uploads` and `data_chroma`,
@@ -217,7 +229,7 @@ Open `http://localhost:8501`. Upload in the sidebar, ask in the main pane.
 
 **Authentication.** Every endpoint below except `GET /health` requires the header
 `X-API-Key: <BACKEND_API_KEY>` and answers `401` otherwise. If `BACKEND_API_KEY` is empty
-the check is skipped entirely — development only, and a warning is logged at startup.
+the check is skipped entirely - development only, and a warning is logged at startup.
 
 `user_id` is **required** everywhere and must match `^[A-Za-z0-9_-]{1,64}$`; anything else
 is rejected with `422`. It doubles as a directory name and a metadata filter value, which
@@ -237,18 +249,18 @@ Uploads and indexes a document.
     {"message": "Document processed successfully", "filename": "report.pdf",
      "chunks": 15, "duplicate": false}
     ```
--   **Response (duplicate)** — the same bytes were already indexed for this `user_id`
+-   **Response (duplicate)** - the same bytes were already indexed for this `user_id`
     (deduplicated by SHA-256 of the file content):
     ```json
     {"message": "Document already indexed (identical content)", "filename": "report.pdf",
      "chunks": 0, "duplicate": true}
     ```
 -   **Errors**:
-    -   `400` — unsupported extension, empty file, no extractable text, a corrupt or
+    -   `400` - unsupported extension, empty file, no extractable text, a corrupt or
         unparseable document, or a file larger than `MAX_FILE_SIZE`.
-    -   `401` — bad or missing `X-API-Key`.
-    -   `422` — missing or malformed `user_id`.
-    -   `503` — the vector store rejected the write (retryable).
+    -   `401` - bad or missing `X-API-Key`.
+    -   `422` - missing or malformed `user_id`.
+    -   `503` - the vector store rejected the write (retryable).
 
 ### `POST /query`
 Asks a question against the indexed documents.
@@ -263,7 +275,7 @@ Asks a question against the indexed documents.
     ```
     Sources are deduplicated by filename and numbered from 1. When nothing is retrieved
     the call still succeeds with `"No relevant information found."` and an empty
-    `sources` list — the language model is not invoked.
+    `sources` list - the language model is not invoked.
 -   **Errors**: `401`, `422` (validation), `503` (retrieval or generation failed).
 
 ### `POST /clear`
@@ -310,7 +322,7 @@ variable of the same name, read from `.env` or the process environment.
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |
-| `OPENAI_API_KEY` | **Required.** Your OpenAI API key; startup fails without it. | — |
+| `OPENAI_API_KEY` | **Required.** Your OpenAI API key; startup fails without it. | - |
 | `BACKEND_API_KEY` | Shared secret for the `X-API-Key` header. Empty disables auth (development only). Must be ASCII. | `""` |
 | `MODEL_NAME` | Chat model used for generation. | `gpt-4o-mini` |
 | `EMBEDDING_MODEL` | OpenAI embedding model. Recorded in the collection; changing it against an existing collection is refused at startup. | `text-embedding-3-small` |
@@ -322,10 +334,10 @@ variable of the same name, read from `.env` or the process environment.
 | `COLLECTION_NAME` | ChromaDB collection name. | `documents` |
 | `UPLOAD_DIR` | Where raw uploads are stored. | `data/uploads` |
 | `MAX_FILE_SIZE` | Maximum accepted upload, in bytes. | `31457280` (30 MB) |
-| `TELEGRAM_BOT_TOKEN` | Required by the bot only; read directly by `telegram/bot.py`. | — |
+| `TELEGRAM_BOT_TOKEN` | Required by the bot only; read directly by `telegram/bot.py`. | - |
 | `BACKEND_URL` | Backend base URL used by the frontend and bot. Compose overrides it to `http://backend:8000`. | `http://localhost:8000` |
 
-Invalid combinations are rejected at startup rather than at first use — for example
+Invalid combinations are rejected at startup rather than at first use - for example
 `CHUNK_OVERLAP >= CHUNK_SIZE`, a negative `TOP_K_RESULTS`, or a non-ASCII
 `BACKEND_API_KEY` (HTTP headers cannot carry non-ASCII, so such a key could never match).
 
@@ -385,11 +397,11 @@ subsequent search. To switch models, delete the collection directory
 with `concurrency` cancelling superseded runs:
 
 - **lock**: recompiles both lock files and fails if either differs from what is
-  committed — a dependency change without a regenerated lock cannot merge.
+  committed - a dependency change without a regenerated lock cannot merge.
 - **test**: installs `requirements-dev.lock` with `--require-hashes` on Python
   3.10 (the same transitive versions the image ships), runs
   `ruff check app frontend telegram tests`, then `pytest -q` with a dummy
   `OPENAI_API_KEY`.
 - **docker**: builds the image, prints its size, asserts no compiler is present
-  in the runtime stage, then starts the container and probes `/health` — a build
+  in the runtime stage, then starts the container and probes `/health` - a build
   that succeeds but cannot boot used to pass unnoticed.

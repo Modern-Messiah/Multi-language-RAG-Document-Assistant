@@ -37,10 +37,12 @@ jobs:
         run: |
           uv pip compile requirements.txt \
             --python-platform linux --python-version 3.10 \
-            --generate-hashes --output-file requirements.lock --quiet
+            --generate-hashes --no-strip-extras \
+            --output-file requirements.lock --quiet
           uv pip compile requirements.txt requirements-dev.txt \
             --python-platform linux --python-version 3.10 \
-            --generate-hashes --output-file requirements-dev.lock --quiet
+            --generate-hashes --no-strip-extras \
+            --output-file requirements-dev.lock --quiet
 
       - name: Fail if a lock is stale
         run: |
@@ -93,7 +95,7 @@ jobs:
         # Guards the split itself: gcc reappearing means the stages got merged.
         run: |
           if docker run --rm --entrypoint sh rag-assistant:ci -c 'command -v gcc'; then
-            echo "::error::gcc is present in the runtime image — the build stage leaked into it"
+            echo "::error::gcc is present in the runtime image - the build stage leaked into it"
             exit 1
           fi
           echo "runtime image has no compiler, as intended"

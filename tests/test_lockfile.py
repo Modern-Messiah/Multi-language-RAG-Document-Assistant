@@ -1,6 +1,6 @@
 """The lock files must stay faithful to requirements*.txt.
 
-A lock exists to stop transitive dependencies from floating — that is how an
+A lock exists to stop transitive dependencies from floating - that is how an
 incompatible posthog release started logging errors on every startup. But a
 lock is only worth having if it cannot silently rot: these tests fail when a
 direct requirement is added, changed, or removed without regenerating it, and
@@ -24,7 +24,16 @@ RUNTIME_LOCK = ROOT / "requirements.lock"
 DEV_LOCK = ROOT / "requirements-dev.lock"
 
 # The locks are resolved for the image and CI, not for a developer laptop.
-EXPECTED_TARGET = ("--python-platform linux", "--python-version 3.10", "--generate-hashes")
+# --no-strip-extras is load-bearing, see test_extras_are_preserved_in_the_lock.
+EXPECTED_TARGET = (
+    "--python-platform linux",
+    "--python-version 3.10",
+    "--generate-hashes",
+    "--no-strip-extras",
+)
+
+# A lock line is "name==version" or "name[extra,extra]==version".
+_PIN = r"^([A-Za-z0-9_.-]+)(?:\[[A-Za-z0-9_.,-]+\])?=="
 
 
 def _direct_requirements(path: Path) -> dict[str, Requirement]:
@@ -40,16 +49,26 @@ def _direct_requirements(path: Path) -> dict[str, Requirement]:
 
 
 def _locked_versions(path: Path) -> dict[str, str]:
-    """Parse a lock into {canonical name: pinned version}."""
+    """Parse a lock into {canonical name: pinned version}, extras ignored."""
     text = path.read_text(encoding="utf-8")
-    pins = re.findall(r"^([A-Za-z0-9_.-]+)==([^\s;]+)", text, re.M)
+    pins = re.findall(_PIN + r"([^\s;]+)", text, re.M)
     return {canonicalize_name(name): version for name, version in pins}
+
+
+def _locked_extras(path: Path) -> dict[str, set[str]]:
+    """Parse a lock into {canonical name: {extra, ...}} for entries with extras."""
+    found = {}
+    for name, extras in re.findall(
+        r"^([A-Za-z0-9_.-]+)\[([A-Za-z0-9_.,-]+)\]==", path.read_text(encoding="utf-8"), re.M
+    ):
+        found[canonicalize_name(name)] = {e.strip() for e in extras.split(",")}
+    return found
 
 
 def _lock_entries(path: Path) -> list[tuple[str, str]]:
     """[(name==version, trailing block)] for every entry in a lock."""
     text = path.read_text(encoding="utf-8")
-    starts = [m for m in re.finditer(r"^[A-Za-z0-9_.-]+==[^\s;]+", text, re.M)]
+    starts = [m for m in re.finditer(_PIN + r"[^\s;]+", text, re.M)]
     entries = []
     for index, match in enumerate(starts):
         end = starts[index + 1].start() if index + 1 < len(starts) else len(text)
@@ -89,7 +108,9 @@ def test_lock_header_records_the_resolution_target(lock):
 def test_every_entry_is_exactly_pinned(lock):
     text = lock.read_text(encoding="utf-8")
 
-    loose = re.findall(r"^([A-Za-z0-9_.-]+)\s*(>=|<=|~=|!=|>|<)", text, re.M)
+    loose = re.findall(
+        r"^([A-Za-z0-9_.-]+)(?:\[[A-Za-z0-9_.,-]+\])?\s*(>=|<=|~=|!=|>|<)", text, re.M
+    )
     assert not loose, f"{lock.name} has unpinned entries: {loose[:5]}"
 
 
@@ -145,7 +166,7 @@ def test_locked_versions_satisfy_the_declared_specifiers(input_file, lock_file):
         version = locked[name]
         assert requirement.specifier.contains(version, prereleases=True), (
             f"{name}: requirements declares {requirement.specifier}, "
-            f"lock pins {version} — regenerate the lock"
+            f"lock pins {version} - regenerate the lock"
         )
 
 
@@ -173,6 +194,34 @@ def test_runtime_and_dev_locks_agree_on_shared_versions():
 # =========================
 # Specific regressions worth naming
 # =========================
+
+@pytest.mark.parametrize("lock", LOCKS, ids=lambda p: p.name)
+def test_extras_are_preserved_in_the_lock(lock):
+    """Stripped extras break `pip install --require-hashes` outright.
+
+    uv strips extras by default, so the first lock recorded plain
+    `uvicorn==0.29.0`. chromadb asks for `uvicorn[standard]>=0.18.3`, pip treats
+    the extra-decorated name as a separate unpinned requirement, goes looking for
+    a fresh uvicorn and dies with "all requirements must have their versions
+    pinned with ==". The Docker build caught it; nothing local did.
+    """
+    declared = {
+        name: set(req.extras)
+        for name, req in _direct_requirements(RUNTIME_IN).items()
+        if req.extras
+    }
+    assert declared, "expected at least one extras requirement (uvicorn[standard])"
+
+    locked = _locked_extras(lock)
+    for name, extras in declared.items():
+        assert name in locked, (
+            f"{name} is declared with extras {sorted(extras)} but the lock records "
+            f"it without any - regenerate with --no-strip-extras"
+        )
+        assert extras <= locked[name], (
+            f"{name}: declared extras {sorted(extras)}, lock has {sorted(locked[name])}"
+        )
+
 
 def test_posthog_is_constrained():
     """chromadb 0.4.24 requires only posthog>=2.4.0, and posthog 4 broke it."""

@@ -1,7 +1,7 @@
 """Documentation must not drift from the code again.
 
 Stage 2 inherited docs that described optional user_id, a `streamlit_user`
-tenant, 500/50 chunking and no auth header — all false. These tests pin the
+tenant, 500/50 chunking and no auth header - all false. These tests pin the
 mechanical parts of that contract so the next drift fails CI instead of
 misleading a reader.
 """
