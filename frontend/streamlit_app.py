@@ -86,7 +86,7 @@ section[data-testid="stSidebar"] * {
 /* Streamlit's uploader prints its own "Limit 200MB per file" caption, which
    contradicts the backend's MAX_FILE_SIZE. Hide it; the label above states
    the real limit. (This rule was previously nested inside the block above,
-   which made it — and the sidebar font-size — invalid CSS.) */
+   which made it - and the sidebar font-size - invalid CSS.) */
 section[data-testid="stFileUploader"] small {
     display: none !important;
 }
@@ -153,7 +153,7 @@ st.markdown("<hr>", unsafe_allow_html=True)
 # =========================
 # Per-session identity
 # =========================
-# Each browser session gets its own document namespace — previously all
+# Each browser session gets its own document namespace - previously all
 # visitors shared one "streamlit_user" corpus and could clear each other's
 # documents. Note: documents outlive the session on the backend; a page
 # refresh starts a fresh namespace.
@@ -287,7 +287,7 @@ with st.sidebar:
     )
 
 # =========================
-# Main — Status
+# Main - Status
 # =========================
 # Count what the backend actually accepted, not what the widget is holding:
 # the old count included files that failed to index, and dropped to zero as

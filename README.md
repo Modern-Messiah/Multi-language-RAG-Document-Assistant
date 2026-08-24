@@ -9,7 +9,7 @@ ChromaDB vector store, OpenAI embeddings and chat.
 - **Multi-document Support**: PDF and TXT uploads, with legacy text encodings (cp1251,
   koi8-r, …) detected automatically.
 - **Multilingual Intelligence**: Questions and answers in English, Russian, Kazakh,
-  French, German, Spanish, Chinese, and Japanese — or `Auto` to mirror the question's
+  French, German, Spanish, Chinese, and Japanese - or `Auto` to mirror the question's
   language.
 - **Semantic Search**: ChromaDB for fast retrieval, with per-owner metadata filtering.
 - **Source Attribution**: Every answer is accompanied by a separate list of source
@@ -41,11 +41,11 @@ ChromaDB vector store, OpenAI embeddings and chat.
    cp .env.template .env
    ```
    Then edit `.env`:
-   - `OPENAI_API_KEY` — required, the app refuses to start without it.
-   - `BACKEND_API_KEY` — the shared secret every client sends as `X-API-Key`.
+   - `OPENAI_API_KEY` - required, the app refuses to start without it.
+   - `BACKEND_API_KEY` - the shared secret every client sends as `X-API-Key`.
      Replace the placeholder with a long random ASCII string. Leaving it **empty**
      disables authentication entirely (development only; a warning is logged).
-   - `TELEGRAM_BOT_TOKEN` — required only if you run the bot service.
+   - `TELEGRAM_BOT_TOKEN` - required only if you run the bot service.
 
 2. **Run with Docker**:
    ```bash
@@ -64,7 +64,7 @@ ChromaDB vector store, OpenAI embeddings and chat.
 
 3. **Access the services**:
    - **Frontend**: `http://localhost:8501`
-   - **API Docs**: `http://localhost:8000/docs` — published on the **loopback interface
+   - **API Docs**: `http://localhost:8000/docs` - published on the **loopback interface
      only**; the frontend and bot reach the API over the internal `rag_net` network.
 
 4. **Telegram Bot**:
@@ -94,7 +94,13 @@ ruff check app frontend telegram tests
 pytest -q
 ```
 
-The test suite runs **fully offline** — embeddings are replaced with deterministic local
+Dependencies are declared in `requirements*.txt` and resolved into
+`requirements*.lock` (every transitive package pinned and hashed), which is what
+the Docker image and CI install. The locks target linux / CPython 3.10, so
+install from `requirements.txt` on a Windows or macOS machine. See
+[DOCUMENTATION.md](DOCUMENTATION.md) for how to regenerate them.
+
+The test suite runs **fully offline** - embeddings are replaced with deterministic local
 vectors and the OpenAI chat client is injected, so no test makes a network call.
 `OPENAI_API_KEY` still has to be set to any non-empty value.
 

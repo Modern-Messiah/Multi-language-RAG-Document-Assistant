@@ -86,7 +86,7 @@ def test_multiple_documents_share_one_upload_wide_numbering():
     """chunk_id/total_chunks count the whole upload, not each source document.
 
     A multi-page PDF arrives as one Document per page, and the ids must stay
-    unique across the batch — that is what makes the per-upload chunk ids in
+    unique across the batch - that is what makes the per-upload chunk ids in
     app/main.py collision-free.
     """
     pages = [_doc(" ".join(f"p{n}word{i}" for i in range(200)), page=n) for n in range(3)]

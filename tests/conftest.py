@@ -79,7 +79,7 @@ def _no_real_network(_isolated_environment):
         if not _is_loopback(address):
             raise RuntimeError(
                 f"A test tried to connect to {address!r}. The suite must stay "
-                "offline — stub the client instead."
+                "offline - stub the client instead."
             )
         return real_connect(self, address, *args, **kwargs)
 
@@ -87,7 +87,7 @@ def _no_real_network(_isolated_environment):
         if not _is_loopback(address):
             raise RuntimeError(
                 f"A test tried to connect to {address!r}. The suite must stay "
-                "offline — stub the client instead."
+                "offline - stub the client instead."
             )
         return real_create(address, *args, **kwargs)
 

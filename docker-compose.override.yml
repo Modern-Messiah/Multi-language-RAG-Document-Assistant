@@ -6,7 +6,7 @@ services:
   backend:
     # --reload-dir scopes the watcher to the backend package. The default is
     # the whole working directory, which the bind mount below re-populates with
-    # everything .dockerignore keeps out of the image — including a local
+    # everything .dockerignore keeps out of the image - including a local
     # .venv of several thousand files.
     command: >
       uvicorn app.main:app --host 0.0.0.0 --port 8000

@@ -56,7 +56,7 @@ def backend_error(response) -> str:
     if response.status_code in (401, 403):
         # "Invalid or missing API key" is for the operator, not the user.
         logger.error(
-            "Backend rejected the bot's API key (HTTP %s) — check BACKEND_API_KEY",
+            "Backend rejected the bot's API key (HTTP %s) - check BACKEND_API_KEY",
             response.status_code,
         )
         return "I am not configured correctly. Please contact the operator."
@@ -135,7 +135,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if doc.file_size and doc.file_size > FileSizeLimit.FILESIZE_DOWNLOAD:
         limit_mb = FileSizeLimit.FILESIZE_DOWNLOAD // (1000 * 1000)
         await update.message.reply_text(
-            f"That file is too big for me to download — Telegram limits bots "
+            f"That file is too big for me to download - Telegram limits bots "
             f"to {limit_mb} MB. Try splitting it."
         )
         return
@@ -253,7 +253,7 @@ def main():
 
     if TELEGRAM_BOT_TOKEN in PLACEHOLDER_TOKENS:
         logger.error(
-            "TELEGRAM_BOT_TOKEN is still the .env.template placeholder — "
+            "TELEGRAM_BOT_TOKEN is still the .env.template placeholder - "
             "put a real token from @BotFather in .env"
         )
         return

@@ -4,14 +4,14 @@ target-version = "py310"
 
 [tool.ruff.lint]
 # F: pyflakes (undefined names, unused imports/vars), E9: syntax errors,
-# I: import sorting. Kept minimal on purpose — high signal, no style noise.
+# I: import sorting. Kept minimal on purpose - high signal, no style noise.
 select = ["F", "E9", "I"]
 
 [tool.ruff.lint.isort]
 # The repo has a local `telegram/` directory holding the bot, which collides
 # with the installed python-telegram-bot package. Ruff versions disagree about
-# whether `telegram` is therefore first-party — 0.6.9 and 0.16.3 sort this file
-# differently — so a ruff upgrade alone would turn CI red. State it explicitly.
+# whether `telegram` is therefore first-party - 0.6.9 and 0.16.3 sort this file
+# differently - so a ruff upgrade alone would turn CI red. State it explicitly.
 known-third-party = ["telegram"]
 
 [tool.pytest.ini_options]

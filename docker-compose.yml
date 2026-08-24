@@ -16,7 +16,7 @@ services:
       # user_id is unauthenticated client input, so it is not safe to expose.
       # Frontend and bot reach it over rag_net instead.
       # NOTE: the frontend below IS published on all interfaces and has no
-      # authentication of its own while holding that same secret — put it
+      # authentication of its own while holding that same secret - put it
       # behind an authenticating reverse proxy on any untrusted network.
       - "127.0.0.1:8000:8000"
     healthcheck:

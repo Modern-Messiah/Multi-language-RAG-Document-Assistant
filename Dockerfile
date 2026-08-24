@@ -1,25 +1,51 @@
-# Use an official Python runtime as a parent image
-FROM python:3.10-slim
+# =========================================================================
+# Builder: compiles anything without a wheel, then is thrown away.
+# =========================================================================
+FROM python:3.10-slim AS builder
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Set the working directory in the container
-WORKDIR /app
-
-# Install system dependencies
+# Only the builder needs a toolchain. Keeping it out of the runtime image is
+# the whole point of splitting the build in two.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies first so a code change does not reinstall them
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
-# Create the unprivileged user before copying the code, so COPY can set the
-# ownership directly. A `chown -R` after COPY would duplicate the whole tree
-# into an extra image layer.
+# Install from the fully-resolved lock, not requirements.txt: the latter pins
+# only the 17 direct dependencies and lets ~130 transitive ones float, which is
+# how an incompatible posthog release started breaking startup.
+# --require-hashes makes pip refuse anything whose artifact does not match.
+COPY requirements.lock .
+RUN pip install --require-hashes -r requirements.lock
+
+
+# =========================================================================
+# Runtime: no compiler, no lock, just the venv and the app.
+# =========================================================================
+FROM python:3.10-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH" \
+    VIRTUAL_ENV=/opt/venv
+
+# libgomp1 is the one native library the runtime still needs: onnxruntime
+# (pulled in by chromadb) links against libgomp and previously got it as a
+# side effect of build-essential. ~150 KB instead of ~200 MB.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /opt/venv /opt/venv
+
+# Create the unprivileged user before copying so COPY can set ownership
+# directly; a `chown -R` afterwards would duplicate the tree in a new layer.
 RUN useradd --create-home appuser
 
 COPY --chown=appuser:appuser . .

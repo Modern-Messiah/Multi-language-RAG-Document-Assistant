@@ -2,7 +2,7 @@
 
 The chain, the Streamlit picker and the bot keyboard each hardcode their own
 list. If a client offers a language the chain has no rule for, the request
-still succeeds but silently ignores the user's choice — so compare them by
+still succeeds but silently ignores the user's choice - so compare them by
 parsing the client sources (no imports, no side effects).
 """
 import ast
