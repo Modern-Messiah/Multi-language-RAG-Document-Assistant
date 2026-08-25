@@ -405,6 +405,7 @@ variable of the same name, read from `.env` or the process environment.
 | `TOP_K_RESULTS` | Chunks retrieved per question, `>= 1`. | `5` |
 | `RELEVANCE_THRESHOLD` | Cosine similarity a chunk must reach to enter the prompt, `0.0`-`1.0`. `0` keeps every candidate. | `0.0` |
 | `MAX_HISTORY_TURNS` | Past exchanges a follow-up may draw on, `0`-`20`. `0` disables multi-turn. | `6` |
+| `MMR_LAMBDA` | Diversity of retrieved chunks, `0.0`-`1.0`. `1.0` ranks by relevance alone. | `1.0` |
 | `MAX_ANSWER_TOKENS` | Cap on generated answer length, `>= 1`. Without it a completion is unbounded at your expense. | `1000` |
 | `OPENAI_TIMEOUT` | Seconds the OpenAI client waits. Keep it below the clients' own timeouts. | `45.0` |
 | `OPENAI_MAX_RETRIES` | Retries the OpenAI client makes on a transient failure. | `2` |
@@ -456,6 +457,44 @@ single-turn behaviour), and the request schema caps the list at 20 turns
 regardless. A first question makes no extra call, so the common case costs
 nothing new, and if the rewrite fails the original question is used - a
 condensing hiccup degrades the answer rather than breaking the request.
+
+### Chunk diversity (MMR)
+
+Chunks overlap by `CHUNK_OVERLAP` characters, so the neighbours of a strong
+match are strong matches too, and the top `TOP_K_RESULTS` can be one passage
+repeated. That is not hypothetical. On a nine-chunk corpus where one document
+supplied six of them, the question *"How is electricity generated and stored?"*
+returned five chunks about generation and nothing about storage - the document
+that answered the second half never appeared.
+
+`MMR_LAMBDA` re-ranks candidates to trade a little relevance for coverage: each
+pick maximises `lambda * relevance - (1 - lambda) * closest_already_picked`.
+Candidates are fetched four times over, so there is something to choose between,
+and `RELEVANCE_THRESHOLD` is applied **first** - otherwise diversity spends a
+slot on a chunk that is merely different rather than different and relevant.
+
+It ships at `1.0`, meaning off, and the measurement is why rather than caution:
+
+| lambda | recall@5 | precision@5 | MRR | distinct documents in top-5 |
+| :--- | :--- | :--- | :--- | :--- |
+| 1.0 (off) | 0.875 | **0.600** | 1.000 | 2.00 |
+| 0.9 | 0.875 | 0.550 | 1.000 | 2.25 |
+| 0.8 | 0.875 | 0.400 | 1.000 | 3.00 |
+| 0.7 | **1.000** | 0.350 | 1.000 | 4.00 |
+| 0.5 | 1.000 | 0.350 | 1.000 | 4.00 |
+
+The recall gain arrives only once precision has already fallen from 0.60 to
+0.35: a question about a single topic then carries three unrelated chunks into
+its prompt. MRR stays at 1.0 throughout, so the best match is never displaced -
+the cost is dilution, not a worse top answer. Whether that trade is worth making
+depends on how many questions span several documents, which this repository
+cannot know. Measure it with `evaluation/run_eval.py` on your own corpus.
+
+Diversity needs the candidate vectors, which the ChromaDB collection returns
+alongside the distances in the same query - re-embedding the candidates would
+double the embedding bill on every question. If the chain is ever constructed
+without an embeddings manager, MMR logs a warning once and stays inactive
+rather than pretending to be on.
 
 ### Measuring retrieval
 
