@@ -1,5 +1,4 @@
 import hashlib
-import html
 import sys
 import uuid
 from pathlib import Path
@@ -34,6 +33,11 @@ API_URL = backend_url()
 # API will not honour (the two read the same .env).
 MAX_FILE_MB = max_file_mb()
 
+# Turns sent with a question. The backend caps this again with
+# MAX_HISTORY_TURNS; this is about not shipping a transcript that grows
+# without bound across a long session.
+HISTORY_TURNS_SENT = 6
+
 # Shared secret for the backend; empty means the backend runs with auth
 # disabled (development mode) and the header is simply ignored.
 HEADERS = api_headers()
@@ -65,21 +69,10 @@ input, textarea, button {
     font-size: 20px !important;
 }
 
-.answer-box {
-    background-color: #0f172a;
-    padding: 22px;
-    border-radius: 12px;
-    border: 1px solid #334155;
-    line-height: 1.65;
-}
-
-.source-box {
-    background-color: #020617;
-    padding: 14px;
-    border-radius: 8px;
-    border-left: 4px solid #38bdf8;
-    margin-bottom: 12px;
-}
+/* The answer used to be rendered into a hand-rolled div with hardcoded
+   near-black colours, which meant dark text on a dark panel for anyone using
+   Streamlit's light theme. st.chat_message follows the viewer's theme, so the
+   .answer-box and .source-box rules that styled it are gone. */
 
 section[data-testid="stSidebar"] * {
     font-size: 20px;
@@ -111,16 +104,6 @@ section[data-testid="stFileUploader"] small {
     input, textarea, button {
         font-size: 16px !important;
         width: 100%;
-    }
-
-    .answer-box {
-        padding: 16px;
-        font-size: 16px;
-    }
-
-    .source-box {
-        padding: 12px;
-        font-size: 15px;
     }
 
     section[data-testid="stSidebar"] {
@@ -336,6 +319,7 @@ with st.sidebar:
             if resp.status_code == 200:
                 st.session_state.pop("indexed_files", None)
                 st.session_state.pop("failed_files", None)
+                st.session_state.pop("transcript", None)
                 st.session_state["uploader_key"] += 1
                 st.success("Cleared!")
                 st.rerun()
@@ -364,67 +348,85 @@ else:
     st.warning("No documents indexed yet")
 
 # =========================
-# Question input
+# Conversation
 # =========================
-st.subheader("💬 Ask a question")
+# Every answer used to vanish the moment the next question was asked, and each
+# question was sent on its own - so "and the second one?" retrieved on those
+# literal words. The transcript lives in session state and rides along with the
+# request, which keeps the API stateless.
+transcript = st.session_state.setdefault("transcript", [])
 
-question = st.text_input(
-    "Type your question",
-    placeholder="What is RAG?"
+
+def render_turn(turn):
+    """Replay one exchange as chat bubbles.
+
+    st.chat_message renders in the viewer's Streamlit theme. The old answer box
+    was a hand-rolled div with hardcoded near-black colours, so on a light theme
+    it was dark text on a dark panel.
+    """
+    with st.chat_message("user"):
+        st.markdown(turn["question"])
+    with st.chat_message("assistant"):
+        st.markdown(turn["answer"])
+        if turn.get("sources"):
+            with st.expander(f"📚 {len(turn['sources'])} source(s)"):
+                for src in turn["sources"]:
+                    st.markdown(f"**{src['source']}**")
+                    st.caption(src["preview"])
+
+
+for past_turn in transcript:
+    render_turn(past_turn)
+
+question = st.chat_input(
+    "Ask about your documents"
+    if indexed_documents
+    else "Upload a document first",
+    disabled=not indexed_documents,
 )
 
-ask_btn = st.button("🔍 Ask", type="primary")
+if question and question.strip():
+    with st.chat_message("user"):
+        st.markdown(question)
 
-# =========================
-# Ask logic
-# =========================
-if ask_btn:
-    # Gate on what the backend holds. Gating on the uploader widget blocked
-    # questions about documents that were indexed and perfectly answerable.
-    if not indexed_documents:
-        st.warning("Please upload at least one document first")
-        st.stop()
-
-    if not question.strip():
-        st.warning("Please enter a question")
-        st.stop()
-
-    with st.spinner("Thinking..."):
+    with st.chat_message("assistant"), st.spinner("Thinking..."):
         try:
             response = requests.post(
                 f"{API_URL}/query",
                 json={
                     "question": question,
                     "language": language,
-                    "user_id": USER_ID
+                    "user_id": USER_ID,
+                    # Only what the backend will actually use; sending more
+                    # would just be prompt tokens the API discards.
+                    "history": [
+                        {"question": t["question"], "answer": t["answer"]}
+                        for t in transcript[-HISTORY_TURNS_SENT:]
+                    ],
                 },
                 headers=HEADERS,
-                timeout=120
+                timeout=120,
             )
         except requests.RequestException as e:
             st.error(f"Backend unavailable: {e}")
             st.stop()
 
-    if response.status_code != 200:
-        st.error(backend_error(response))
-    else:
+        if response.status_code != 200:
+            st.error(backend_error(response))
+            st.stop()
+
         data = response.json()
-
-        st.subheader("🧠 Answer")
-        # Escape the answer before dropping it into the styled div: it is
-        # model output grounded in user-uploaded documents, so an uploaded
-        # file could otherwise inject markup into the page.
-        answer_html = html.escape(data["answer"]).replace("\n", "<br>")
-        st.markdown(
-            f"<div class='answer-box'>{answer_html}</div>",
-            unsafe_allow_html=True
-        )
-
+        st.markdown(data["answer"])
         if data.get("sources"):
-            st.subheader("📚 Sources")
-            st.caption("Sources used to generate the answer")
+            with st.expander(f"📚 {len(data['sources'])} source(s)"):
+                for src in data["sources"]:
+                    st.markdown(f"**{src['source']}**")
+                    st.caption(src["preview"])
 
-            for src in data["sources"]:
-                # Use st.expander or safe rendering for sources to avoid InvalidCharacterError
-                with st.expander(f"📍 {src['source']}"):
-                    st.write(src['preview'])
+    transcript.append(
+        {
+            "question": question,
+            "answer": data["answer"],
+            "sources": data.get("sources", []),
+        }
+    )

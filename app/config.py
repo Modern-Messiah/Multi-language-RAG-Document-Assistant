@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     # than including too much. Measure, then set it.
     relevance_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
 
+    # Past exchanges a follow-up question may draw on. Each turn adds prompt
+    # tokens and the condensing call adds one request, so this is bounded.
+    # 0 turns off multi-turn behaviour altogether.
+    max_history_turns: int = Field(default=6, ge=0, le=20)
+
     # Cap on generated answer length. Without one the model can produce an
     # unbounded completion at the operator's expense, and a long answer is
     # also what used to blow past Telegram's 4096-character message limit.

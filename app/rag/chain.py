@@ -20,6 +20,9 @@ __all__ = ["LANG_RULES", "RAGChain", "SYSTEM_PROMPT"]
 
 logger = logging.getLogger(__name__)
 
+# A standalone question is one sentence; this only has to stop a runaway.
+CONDENSE_MAX_TOKENS = 200
+
 
 # =========================
 # Base system prompt
@@ -47,6 +50,7 @@ class RAGChain:
         api_key: Optional[str] = None,
         max_answer_tokens: Optional[int] = None,
         relevance_threshold: float = 0.0,
+        max_history_turns: int = 0,
         timeout: Optional[float] = None,
         max_retries: Optional[int] = None,
         base_url: str = "",
@@ -72,6 +76,9 @@ class RAGChain:
         # Cosine similarity below which a chunk is not worth putting in the
         # prompt. 0.0 keeps every candidate, which is the old behaviour.
         self.relevance_threshold = relevance_threshold
+        # How many past exchanges inform retrieval and the answer. 0 disables
+        # multi-turn entirely, which is how the chain behaved before.
+        self.max_history_turns = max_history_turns
 
         if client is not None:
             self.client = client
@@ -225,10 +232,90 @@ class RAGChain:
         return re.sub(r"\[\d+\]", "", text).strip()
 
     # =========================
+    # Conversation
+    # =========================
+    def _recent(self, history) -> List:
+        """The last few turns, oldest first."""
+        if not history:
+            return []
+        return list(history)[-self.max_history_turns:] if self.max_history_turns else []
+
+    @staticmethod
+    def _turn(entry):
+        """Read a turn from either a pydantic model or a plain dict."""
+        if isinstance(entry, dict):
+            return entry.get("question", ""), entry.get("answer", "")
+        return getattr(entry, "question", ""), getattr(entry, "answer", "")
+
+    def _condense(self, question: str, history) -> str:
+        """Rewrite a follow-up so it can stand on its own.
+
+        "And the second one?" embeds to nothing useful: retrieval matched the
+        literal words rather than what the user meant, so a follow-up pulled
+        back unrelated chunks and the answer degraded exactly when the
+        conversation got going.
+
+        One extra model call, and only when there is history - a first question
+        costs nothing new. If the call fails the original question is used, so
+        a condensing hiccup degrades the answer instead of breaking the request.
+        """
+        recent = self._recent(history)
+        if not recent:
+            return question
+
+        transcript = "\n".join(
+            f"User: {q}\nAssistant: {a}" for q, a in map(self._turn, recent)
+        )
+        instruction = (
+            "Rewrite the follow-up question as a standalone question in the "
+            "same language, resolving pronouns and references from the "
+            "conversation. Reply with the question only, nothing else. If it "
+            "already stands alone, repeat it unchanged."
+        )
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": instruction},
+                    {
+                        "role": "user",
+                        "content": f"Conversation:\n{transcript}\n\nFollow-up: {question}",
+                    },
+                ],
+                temperature=0,
+                max_tokens=CONDENSE_MAX_TOKENS,
+            )
+            rewritten = (response.choices[0].message.content or "").strip()
+        except Exception:
+            logger.exception("Could not condense the follow-up; using it as written")
+            return question
+
+        if not rewritten:
+            return question
+
+        logger.info("condensed follow-up %r -> %r", question, rewritten)
+        return rewritten
+
+    def _history_block(self, history) -> str:
+        """The conversation so far, for the answering prompt."""
+        recent = self._recent(history)
+        if not recent:
+            return ""
+        lines = [
+            f"User: {q}\nAssistant: {a}" for q, a in map(self._turn, recent)
+        ]
+        return "\n".join(lines)
+
+    # =========================
     # Main RAG method
     # =========================
     def ask(
-        self, question: str, language: str = AUTO_LANGUAGE, user_id: str = None
+        self,
+        question: str,
+        language: str = AUTO_LANGUAGE,
+        user_id: str = None,
+        history=None,
     ) -> Dict:
         # A falsy user_id used to mean "no filter", i.e. search every tenant's
         # documents. No caller wants that, so make it impossible rather than
@@ -238,7 +325,9 @@ class RAGChain:
 
         filter_dict = {"user_id": user_id}
 
-        docs = self._retrieve(question, filter_dict)
+        # Retrieve on the standalone form, answer the question as asked.
+        search_query = self._condense(question, history)
+        docs = self._retrieve(search_query, filter_dict)
 
         if not docs:
             return {
@@ -257,8 +346,11 @@ Language rule:
 - {lang_rule}
 """
 
+        conversation = self._history_block(history)
+        history_section = f"Conversation so far:\n{conversation}\n\n" if conversation else ""
+
         user_prompt = f"""
-Context:
+{history_section}Context:
 {context}
 
 Question:

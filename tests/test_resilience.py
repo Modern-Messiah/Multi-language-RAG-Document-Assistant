@@ -176,7 +176,7 @@ def test_transport_settings_are_range_checked(overrides):
 # =========================
 
 def _raise(exc):
-    def boom(question, language="Auto", user_id=None):
+    def boom(*args, **kwargs):
         raise exc
 
     return boom
