@@ -1,12 +1,13 @@
 # 📄 Multi-language RAG Document Assistant - Technical Documentation
 
 A RAG (Retrieval-Augmented Generation) assistant that lets users query their own documents
-(PDF, TXT) in multiple languages with source attribution.
+(PDF, DOCX, Markdown, TXT) in multiple languages with source attribution.
 
 ## Key Features
 
-- **Multi-document Support**: specialized loaders for PDF and TXT files, with charset
-  detection for legacy text encodings.
+- **Multi-document Support**: specialized loaders for PDF, DOCX and text files
+  (`.txt`, `.md`, `.markdown`), with charset detection for legacy text encodings.
+  DOCX table cells are extracted as well, joined with ` | ` so a row stays one line.
 - **Intelligent Chunking**: overlapping chunks preserve context - 1000 characters with 200 characters of overlap by default, configurable via `CHUNK_SIZE` / `CHUNK_OVERLAP`.
 - **Multilingual Support**: explicit prompt rules for English, Russian, Kazakh, French,
   German, Spanish, Chinese, and Japanese, plus an `Auto` mode that mirrors the question.
@@ -57,7 +58,7 @@ graph TD
     -   `backend.py`: configuration and the error wording both clients share.
         They used to keep their own diverging copies of it.
     -   `telegram_bot.py`: the Telegram bot, built with `python-telegram-bot`.
-        Supports document uploads (PDF/TXT) and text queries, and keeps the
+        Supports document uploads (PDF/DOCX/Markdown/TXT) and text queries, and keeps the
         chosen answer language in per-user state. Run it with
         `python -m clients.telegram_bot`.
     -   The bot lived in `telegram/` until Stage 3. That name collides with the
@@ -143,7 +144,7 @@ pytest -q
 the direct dependencies only. `requirements.lock` and `requirements-dev.lock` are
 the **fully resolved** sets: every transitive package pinned, with SHA-256 hashes.
 
-Why both: pinning only the 17 direct dependencies left ~130 transitive ones
+Why both: pinning only the direct dependencies left ~130 transitive ones
 floating, and that is exactly how an incompatible `posthog` release started
 logging an error on every startup. The Docker image and CI install from the
 locks, so a build is reproducible and `pip` refuses any artifact whose hash does
@@ -229,7 +230,7 @@ Open `http://localhost:8501`. Upload in the sidebar, ask in the main pane.
 
 ### 3. Telegram Bot
 1. Send `/start` and pick an answer language.
-2. Attach a document (PDF/TXT).
+2. Attach a document (PDF, DOCX, Markdown or TXT).
 3. Send any plain text message to ask a question.
 4. `/documents` lists what is indexed; `/clear` removes all of it;
    `/help` shows usage.
@@ -251,7 +252,9 @@ Liveness probe. **No authentication.**
 
 ### `POST /upload`
 Uploads and indexes a document.
--   **Body**: `multipart/form-data` with `file` (`.txt` or `.pdf`).
+-   **Body**: `multipart/form-data` with `file` (`.pdf`, `.docx`, `.txt`, `.md`,
+    `.markdown`). The list lives in `SUPPORTED_EXTENSIONS` in
+    `app/rag/document_loader.py`, which the API gate and both clients read.
 -   **Query Parameters**: `user_id` (**required**, see above).
 -   **Response (indexed)**:
     ```json
@@ -358,6 +361,37 @@ Deletes the caller's documents: both the vectors **and** the raw uploaded files 
 -   **Query Parameters**: `user_id` (**required**).
 -   **Response**: `{"message": "Documents cleared successfully"}`
 -   **Errors**: `401`, `422`, `500` (deletion failed).
+
+## Supported formats
+
+| Extension | Loader | Notes |
+| --- | --- | --- |
+| `.pdf` | `PyPDFLoader` | One document per page, so citations can name a page. |
+| `.docx` | `python-docx` | Paragraphs and table cells. |
+| `.txt` | built-in | Charset detection for legacy encodings. |
+| `.md`, `.markdown` | built-in | Markdown syntax is kept, not stripped. |
+
+The list is `SUPPORTED_EXTENSIONS` in `app/rag/document_loader.py`. The API's
+extension gate and both clients' file pickers read it, so a new format is added
+in one place rather than four; a test asserts none of them keeps its own copy.
+
+**DOCX tables.** `python-docx` does not include table text in
+`document.paragraphs`, so a loader that reads only paragraphs indexes the prose
+around the answer and not the answer - in these documents the rates, dates and
+headcounts a person asks about are usually in a table. Each row becomes one line
+with cells joined by ` | `, which keeps a value attached to its label; a merged
+cell, which `python-docx` repeats once per column it spans, is emitted once.
+Headers, footers and footnotes are **not** read.
+
+**Markdown** goes through the text loader unchanged. Its syntax carries meaning a
+reader relies on - a heading says what a section is about - so stripping it to
+bare prose would discard structure the model can use. The document listing
+reports the real extension (`md`), not `txt`.
+
+**The old `.doc` format** (pre-2007 binary) is not supported and `python-docx`
+cannot read it. Uploading one is rejected with instructions to re-save as
+`.docx` or export to PDF, because "unsupported format" tells the person nothing
+they can act on.
 
 ## Supported languages
 
@@ -580,7 +614,7 @@ subsequent search. To switch models, delete the collection directory
 │   ├── models/                 # Pydantic models (QueryRequest, QueryResponse)
 │   ├── rag/                    # RAG core logic
 │   │   ├── languages.py        # The one language table both clients derive from
-│   │   ├── document_loader.py  # File parsing (PDF/TXT) + charset detection
+│   │   ├── document_loader.py  # File parsing (PDF/DOCX/text) + charset detection
 │   │   ├── text_splitter.py    # Recursive chunking
 │   │   ├── embeddings.py       # Vector DB management (ChromaDB)
 │   │   └── chain.py            # Retrieval + generation & prompts

@@ -6,8 +6,9 @@ ChromaDB vector store, OpenAI embeddings and chat.
 
 ## Key Features
 
-- **Multi-document Support**: PDF and TXT uploads, with legacy text encodings (cp1251,
-  koi8-r, …) detected automatically.
+- **Multi-document Support**: PDF, DOCX, Markdown and plain text uploads. DOCX
+  tables are read too, since that is where rates and dates usually sit. Legacy
+  text encodings (cp1251, koi8-r, ...) are detected automatically.
 - **Multilingual Intelligence**: Questions and answers in English, Russian, Kazakh,
   French, German, Spanish, Chinese, and Japanese - or `Auto` to mirror the question's
   language.
@@ -77,7 +78,7 @@ ChromaDB vector store, OpenAI embeddings and chat.
 
 4. **Telegram Bot**:
    - Send `/start` and pick an answer language.
-   - Attach a PDF or TXT file to index it.
+   - Attach a PDF, DOCX, Markdown or TXT file to index it.
    - Send any plain text message to ask a question about your documents.
    - `/documents` lists what is indexed, `/clear` deletes all of it,
      `/help` shows usage.

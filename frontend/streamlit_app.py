@@ -14,7 +14,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from clients.backend import (  # noqa: E402  (must follow the sys.path fix)
+from app.rag.document_loader import (  # noqa: E402  (must follow the sys.path fix)
+    SUPPORTED_EXTENSIONS,
+)
+from clients.backend import (  # noqa: E402
     SUPPORTED_LANGUAGES,
     api_headers,
     backend_url,
@@ -38,6 +41,11 @@ MAX_FILE_MB = max_file_mb()
 # MAX_HISTORY_TURNS; this is about not shipping a transcript that grows
 # without bound across a long session.
 HISTORY_TURNS_SENT = 6
+
+UPLOAD_LABEL = " or ".join(
+    [", ".join(e.lstrip(".").upper() for e in SUPPORTED_EXTENSIONS[:-1]),
+     SUPPORTED_EXTENSIONS[-1].lstrip(".").upper()]
+)
 
 # Shared secret for the backend; empty means the backend runs with auth
 # disabled (development mode) and the header is simply ignored.
@@ -159,8 +167,8 @@ with st.sidebar:
     st.session_state.setdefault("uploader_key", 0)
 
     uploaded_files = st.file_uploader(
-        f"TXT or PDF files (max {MAX_FILE_MB} MB per file)",
-        type=["txt", "pdf"],
+        f"{UPLOAD_LABEL} files (max {MAX_FILE_MB} MB per file)",
+        type=[extension.lstrip(".") for extension in SUPPORTED_EXTENSIONS],
         accept_multiple_files=True,
         key=f"uploader_{st.session_state['uploader_key']}"
     )

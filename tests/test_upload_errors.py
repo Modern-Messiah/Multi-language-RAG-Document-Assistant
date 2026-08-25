@@ -164,7 +164,9 @@ def test_size_limit_message_reports_the_configured_limit(tmp_path, fake_openai_e
 # =========================
 
 def test_unsupported_extensions_are_rejected(api):
-    for filename in ("evil.exe", "no_extension", "notes.docx", "archive.txt.zip"):
+    # .doc, not .docx: the modern format is supported now, the 1997 binary one
+    # is not, and the two differ by one character in the file picker.
+    for filename in ("evil.exe", "no_extension", "notes.doc", "archive.txt.zip"):
         response = _upload(api, filename, TXT)
         assert response.status_code == 400, f"{filename} was accepted"
         assert _stored(api) == [], f"{filename} was written to disk"
