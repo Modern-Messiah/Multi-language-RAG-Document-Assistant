@@ -11,6 +11,7 @@ import httpx
 from langchain.schema import Document
 from openai import OpenAI
 
+from app.rag.embeddings import DEFAULT_SPACE, distance_to_similarity
 from app.rag.languages import AUTO_LANGUAGE, LANG_RULES, rule_for
 
 # LANG_RULES is re-exported: it lived here first, and the clients now read the
@@ -45,6 +46,7 @@ class RAGChain:
         client: OpenAI = None,
         api_key: Optional[str] = None,
         max_answer_tokens: Optional[int] = None,
+        relevance_threshold: float = 0.0,
         timeout: Optional[float] = None,
         max_retries: Optional[int] = None,
         base_url: str = "",
@@ -67,6 +69,9 @@ class RAGChain:
             temperature if temperature is not None else os.getenv("TEMPERATURE", 0)
         )
         self.max_answer_tokens = max_answer_tokens
+        # Cosine similarity below which a chunk is not worth putting in the
+        # prompt. 0.0 keeps every candidate, which is the old behaviour.
+        self.relevance_threshold = relevance_threshold
 
         if client is not None:
             self.client = client
@@ -123,6 +128,87 @@ class RAGChain:
             )
 
     # =========================
+    # Retrieval
+    # =========================
+    def _retrieve(self, question: str, filter_dict: dict) -> List[Document]:
+        """Fetch candidates, dropping any that are not actually relevant.
+
+        Plain similarity_search returns k chunks whether or not anything in the
+        corpus has to do with the question, so asking about a topic the user
+        never uploaded still filled the prompt with their nearest unrelated
+        paragraphs. Whether the model then says "I don't know" or quietly
+        answers from that noise is left entirely to the prompt.
+
+        Scores are logged on every query even when filtering is off, so the
+        threshold can be chosen from data rather than guessed.
+        """
+        scored = self._search_with_scores(question, filter_dict)
+        if scored is None:
+            # A vector store without the scored API (or an injected double).
+            return self.vectorstore.similarity_search(
+                question, k=self.top_k, filter=filter_dict
+            )
+
+        space = self._index_space()
+        similarities = []
+        for document, distance in scored:
+            similarity = distance_to_similarity(distance, space)
+            similarities.append((document, similarity))
+
+        if any(similarity is None for _, similarity in similarities):
+            # Unknown metric: comparing against a scale that does not apply
+            # would discard the best matches, so keep everything and say why.
+            logger.warning(
+                "Unknown index space %r - relevance filtering is disabled", space
+            )
+            return [document for document, _ in similarities]
+
+        if similarities:
+            logger.info(
+                "retrieval space=%s candidates=%d similarity_best=%.3f "
+                "similarity_worst=%.3f threshold=%s",
+                space,
+                len(similarities),
+                max(s for _, s in similarities),
+                min(s for _, s in similarities),
+                self.relevance_threshold,
+            )
+
+        if not self.relevance_threshold:
+            return [document for document, _ in similarities]
+
+        kept = [
+            document
+            for document, similarity in similarities
+            if similarity >= self.relevance_threshold
+        ]
+        dropped = len(similarities) - len(kept)
+        if dropped:
+            logger.info(
+                "dropped %d/%d chunk(s) below RELEVANCE_THRESHOLD=%s",
+                dropped,
+                len(similarities),
+                self.relevance_threshold,
+            )
+        return kept
+
+    def _search_with_scores(self, question: str, filter_dict: dict):
+        """Scored search, or None when the store cannot do it."""
+        search = getattr(self.vectorstore, "similarity_search_with_score", None)
+        if search is None:
+            return None
+        try:
+            return search(question, k=self.top_k, filter=filter_dict)
+        except TypeError:
+            # A double whose signature predates the filter argument.
+            return None
+
+    def _index_space(self) -> str:
+        reader = getattr(self.vectorstore, "_collection", None)
+        metadata = (getattr(reader, "metadata", None) or {}) if reader else {}
+        return metadata.get("hnsw:space", DEFAULT_SPACE)
+
+    # =========================
     # Build context
     # =========================
     def _build_context(self, docs: List[Document]) -> str:
@@ -151,10 +237,8 @@ class RAGChain:
             raise ValueError("user_id is required for retrieval")
 
         filter_dict = {"user_id": user_id}
-        
-        docs = self.vectorstore.similarity_search(
-            question, k=self.top_k, filter=filter_dict
-        )
+
+        docs = self._retrieve(question, filter_dict)
 
         if not docs:
             return {

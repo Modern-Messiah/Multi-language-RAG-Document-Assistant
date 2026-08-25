@@ -165,6 +165,7 @@ async def lifespan(app: FastAPI):
         temperature=settings.temperature,
         api_key=settings.openai_api_key,
         max_answer_tokens=settings.max_answer_tokens,
+        relevance_threshold=settings.relevance_threshold,
         timeout=settings.openai_timeout,
         max_retries=settings.openai_max_retries,
         base_url=settings.openai_base_url,

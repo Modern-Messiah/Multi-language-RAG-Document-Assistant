@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     top_k_results: int = Field(default=5, ge=1)
 
+    # Cosine similarity a chunk must reach to be worth putting in the prompt.
+    # 0.0 (the default) keeps every candidate, which is what retrieval did
+    # before this existed. Deliberately not defaulted to a guess: the right
+    # number depends on the corpus and the embedding model, and picking one
+    # blind risks discarding relevant context, which is far harder to notice
+    # than including too much. Measure, then set it.
+    relevance_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
+
     # Cap on generated answer length. Without one the model can produce an
     # unbounded completion at the operator's expense, and a long answer is
     # also what used to blow past Telegram's 4096-character message limit.
