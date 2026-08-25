@@ -70,7 +70,7 @@ jobs:
         run: pip install --require-hashes -r requirements-dev.lock
 
       - name: Lint (ruff)
-        run: ruff check app frontend clients tests
+        run: ruff check app frontend clients evaluation tests
 
       - name: Tests (offline, fake embeddings)
         run: pytest -q
