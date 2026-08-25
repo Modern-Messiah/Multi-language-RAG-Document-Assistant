@@ -391,6 +391,70 @@ Deletes the caller's documents: both the vectors **and** the raw uploaded files 
 -   **Response**: `{"message": "Documents cleared successfully"}`
 -   **Errors**: `401`, `422`, `500` (deletion failed).
 
+## Backup and restore
+
+Everything this assistant knows lives in three directories: the ChromaDB index
+(`CHROMA_PERSIST_DIR`), the raw uploads (`UPLOAD_DIR`) and the collected ratings
+(`FEEDBACK_DIR`). All three are named volumes in the shipped Compose file. Losing
+them lost everything, and there was no procedure - not even a list of what to
+copy.
+
+**Stop the backend first.** ChromaDB is a SQLite database plus HNSW index files
+written separately; a copy taken while something is writing can catch the two out
+of step, and nothing a script does can fix that. Both commands check whether the
+backend answers and refuse if it does. `--live` overrides that where a minute of
+downtime is worse than a small risk.
+
+```bash
+docker compose stop backend
+docker compose run --rm -v "$PWD/backups:/backups" backend     python -m scripts.backup --output /backups
+docker compose start backend
+```
+
+Or on the host, against a local `.env`:
+
+```bash
+python -m scripts.backup --output data/backups
+```
+
+The archive is one `rag-backup-YYYYMMDD-HHMMSS.tar.gz` holding `chroma/`,
+`uploads/`, `feedback/` and a `manifest.json`. No OpenAI key is needed: it only
+copies files.
+
+**What the manifest is for.** An archive alone says nothing about whether it fits
+the deployment being restored into. It records the embedding model, the
+collection name, the chunking, a count of chunks, uploads and ratings, and a
+SHA-256 of every file. Restore verifies each hash and refuses on a mismatch, and
+refuses when the embedding model or the collection name differ - vectors built by
+one model are not visibly wrong to another, only quietly meaningless, which is
+the same failure the startup guard in `embeddings.py` exists to prevent. A
+chunking difference is not refused: it changes what future uploads look like, not
+what existing vectors mean.
+
+```bash
+python -m scripts.restore data/backups/rag-backup-20260825-132254.tar.gz --inspect
+python -m scripts.restore data/backups/rag-backup-20260825-132254.tar.gz --overwrite
+```
+
+`--inspect` reports what an archive holds and whether it fits, and writes
+nothing. Without `--overwrite`, a restore onto directories that already hold data
+is refused; an empty directory does not count as data, because Docker creates the
+mount points before anything is in them. Every check runs before anything on disk
+is touched, so a refusal leaves the current data exactly as it was. `--force`
+restores over an incompatibility and says what it ignored.
+
+An archive is treated as untrusted input even though only an operator can supply
+one: a member whose path escapes the target, or any symlink, aborts the restore.
+
+**There is deliberately no backup endpoint.** The API's only credential is one
+shared secret, so a route that returned the whole corpus would be a
+data-exfiltration endpoint wearing a useful name. Snapshots are an operator task
+on the volume.
+
+**What is not covered.** `.env` - it holds the API keys and is the operator's to
+keep. And this is a snapshot tool, not a schedule: run it from cron or a systemd
+timer, and keep the archives somewhere other than the host that made them.
+
 ## Answer feedback
 
 The golden set in `evaluation/golden.py` is questions *I* wrote. It guards the
@@ -753,6 +817,7 @@ subsequent search. To switch models, delete the collection directory
 │   ├── config.py               # pydantic-settings Settings (single source of truth)
 │   ├── observability.py        # Request ids, access log, readiness checks
 │   ├── feedback.py             # The rating log and the reports read off it
+│   ├── backup.py               # Snapshot and restore, with a verified manifest
 │   ├── models/                 # Pydantic models (QueryRequest, QueryResponse)
 │   ├── rag/                    # RAG core logic
 │   │   ├── languages.py        # The one language table both clients derive from
@@ -775,8 +840,10 @@ subsequent search. To switch models, delete the collection directory
 │   ├── test_embeddings.py      # Vector store operations
 │   └── test_upload_errors.py   # Upload failure modes
 ├── evaluation/                 # Retrieval metrics, golden set, eval and feedback scripts
+├── scripts/                    # Operator tooling: backup.py, restore.py (ships in the image)
 ├── .github/workflows/ci.yml    # Lint + tests + docker build
 ├── data/
+│   ├── backups/                # Archives written by scripts/backup.py (git-ignored)
 │   ├── uploads/                # Raw file storage
 │   └── chroma_db/              # Persistent vector database
 ├── docker-compose.yml          # Production-shaped base

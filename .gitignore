@@ -214,6 +214,9 @@ __marimo__/
 data/uploads/*
 !data/uploads/.gitkeep
 
+# Snapshots written by scripts/backup.py
+data/backups/
+
 # ChromaDB vector database
 data/chroma_db/*
 !data/chroma_db/.gitkeep

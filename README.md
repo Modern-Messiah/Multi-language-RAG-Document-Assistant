@@ -30,6 +30,11 @@ ChromaDB vector store, OpenAI embeddings and chat.
   so a complaint becomes a case the evaluation harness can measure instead of a
   story. `python -m evaluation.from_feedback` turns the collected ones into
   golden-case stubs.
+- **Backup and Restore**: `python -m scripts.backup` writes one verified
+  archive of the index, the uploads and the ratings; `python -m scripts.restore`
+  puts it back and refuses an archive that does not fit the deployment. The test
+  suite does the full round trip, because a backup nobody has restored is a
+  rumour.
 - **Traceable Failures**: Every request carries an id, every log line records
   it, and it comes back in the `X-Request-ID` header - so a user reporting "it
   broke" hands over one string that finds their lines. `/ready` reports whether

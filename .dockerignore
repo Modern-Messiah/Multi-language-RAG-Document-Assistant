@@ -14,3 +14,7 @@ evaluation/
 app/docs/assets/
 data/chroma_db/*
 data/uploads/*
+data/feedback/*
+# Snapshots can be gigabytes; sending them to the daemon as build context would
+# be slow for no reason.
+data/backups/
