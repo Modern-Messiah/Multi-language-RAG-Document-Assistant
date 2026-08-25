@@ -13,6 +13,9 @@ posthog<4
 # Document Processing
 pypdf==4.2.0
 charset-normalizer==3.3.2
+# Was in the original requirements and dropped in Stage 2 because nothing
+# imported it. Back now that the loader actually reads .docx files.
+python-docx==1.1.0
 
 # API
 fastapi==0.111.0

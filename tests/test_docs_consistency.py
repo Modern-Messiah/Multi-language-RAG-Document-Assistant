@@ -149,8 +149,12 @@ def test_every_bot_command_is_documented():
     for command in _registered_bot_commands():
         assert f"/{command}" in README, f"/{command} is not in README.md"
 
-    help_text = (ROOT / "clients" / "telegram_bot.py").read_text(encoding="utf-8")
-    help_block = help_text.split("help_text = (")[1].split(")")[0]
+    bot_source = (ROOT / "clients" / "telegram_bot.py").read_text(encoding="utf-8")
+    # End the block at the closing paren that sits on its own line, not at the
+    # first ")" in the text: the help text itself contains parentheses.
+    block = re.search(r"help_text = \(\n(.*?)\n    \)", bot_source, re.DOTALL)
+    assert block, "could not find the /help text"
+    help_block = block.group(1)
     for command in _registered_bot_commands() - {"help"}:
         assert f"/{command}" in help_block, f"/{command} is missing from /help"
 

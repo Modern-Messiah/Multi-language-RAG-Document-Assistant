@@ -14,6 +14,7 @@ from telegram.ext import (
     filters,
 )
 
+from app.rag.document_loader import SUPPORTED_EXTENSIONS
 from clients.backend import (
     AUTO_LANGUAGE,
     SUPPORTED_LANGUAGES,
@@ -53,6 +54,9 @@ CLEAR_TIMEOUT = 30.0
 # the bound here stops a long-running chat from growing the request body
 # without limit.
 HISTORY_TURNS = 6
+
+# One list of formats, shared with the API and the web UI.
+SUPPORTED_LIST = ", ".join(e.lstrip(".").upper() for e in SUPPORTED_EXTENSIONS)
 
 # Copying .env.template without editing it leaves these in place, and because
 # they are non-empty the bot used to sail past its own "token missing" check
@@ -128,7 +132,7 @@ def format_document_list(documents: list) -> str:
     formatting is the part worth testing without a Telegram server in the loop.
     """
     if not documents:
-        return "You have no documents indexed. Send me a PDF or TXT file."
+        return f"You have no documents indexed. Send me a file ({SUPPORTED_LIST})."
 
     lines = [f"<b>Your documents ({len(documents)}):</b>"]
     for doc in documents:
@@ -181,7 +185,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send a message when the command /help is issued."""
     help_text = (
         "How to use me:\n"
-        "1. Attach a PDF or TXT file and I will index it.\n"
+        f"1. Attach a file ({SUPPORTED_LIST}) and I will index it.\n"
         "2. Send any text message to ask questions about your documents.\n"
         "3. Select a language from the keyboard to set the response language.\n"
         "4. Use /documents to see what I have indexed.\n"
@@ -245,8 +249,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # generated attachments arrive without one), so guard before .lower().
     file_name = doc.file_name or ""
     
-    if not file_name.lower().endswith(('.pdf', '.txt')):
-        await update.message.reply_text("Sorry, I only support PDF and TXT files.")
+    if not file_name.lower().endswith(SUPPORTED_EXTENSIONS):
+        await update.message.reply_text(
+            f"Sorry, I only support these formats: {SUPPORTED_LIST}."
+        )
         return
 
     # Telegram refuses getFile above 20 MB regardless of what the backend
@@ -303,7 +309,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ Language set to: {text}\n\n"
             "<b>Now, what would you like to do?</b>\n"
-            "1. 📄 Attach a <b>PDF</b> or <b>TXT</b> file to index it.\n"
+            f"1. 📄 Attach a file (<b>{SUPPORTED_LIST}</b>) to index it.\n"
             "2. 💬 Ask me questions about your documents.\n\n"
             "You can change the language at any time by clicking the buttons below.",
             parse_mode='HTML'

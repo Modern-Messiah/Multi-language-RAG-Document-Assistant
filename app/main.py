@@ -35,7 +35,7 @@ from app.models.schemas import (
     UploadResponse,
 )
 from app.rag.chain import RAGChain
-from app.rag.document_loader import DocumentLoader
+from app.rag.document_loader import SUPPORTED_EXTENSIONS, DocumentLoader
 from app.rag.embeddings import EmbeddingsManager
 from app.rag.text_splitter import TextChunker
 
@@ -223,10 +223,13 @@ def upload_document(
 
     safe_name = safe_filename(file.filename)
 
-    if not safe_name.lower().endswith((".txt", ".pdf")):
+    if not safe_name.lower().endswith(SUPPORTED_EXTENSIONS):
         raise HTTPException(
             status_code=400,
-            detail="Only TXT and PDF files are supported"
+            detail=(
+                "Unsupported file type. Supported: "
+                + ", ".join(e.lstrip(".").upper() for e in SUPPORTED_EXTENSIONS)
+            ),
         )
 
     def too_large() -> HTTPException:

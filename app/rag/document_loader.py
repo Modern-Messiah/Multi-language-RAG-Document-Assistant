@@ -1,6 +1,6 @@
 """
 Document Loader for RAG Assistant
-Supports PDF and TXT files with metadata extraction
+Supports PDF, DOCX, Markdown and plain text files with metadata extraction
 """
 
 import logging
@@ -8,25 +8,37 @@ from pathlib import Path
 from typing import List
 
 from charset_normalizer import from_bytes
+from docx import Document as DocxDocument
 from langchain.schema import Document
 from langchain_community.document_loaders import PyPDFLoader
 
 logger = logging.getLogger(__name__)
+
+# Read through load_txt, with charset detection for legacy encodings.
+TEXT_EXTENSIONS = (".txt", ".md", ".markdown")
+
+# The single source of truth for what may be uploaded. The API's extension gate
+# and both clients' file pickers read this, so a new format is added in one
+# place instead of four.
+SUPPORTED_EXTENSIONS = (".pdf", ".docx", *TEXT_EXTENSIONS)
 
 
 class DocumentLoader:
     """
     Load and parse documents with metadata extraction
     
-    Supported formats:
-    - PDF (.pdf)
-    - Text (.txt)
-    
+    Supported formats: see SUPPORTED_EXTENSIONS above, which the API's upload
+    gate and both clients read as well.
+    - PDF (.pdf), one document per page
+    - Word (.docx), paragraphs and table cells
+    - Text (.txt) and Markdown (.md, .markdown), with charset detection
+
     Each document is loaded with metadata including:
     - source: filename
     - page: page number (PDF only)
     - total_pages: total pages in document (PDF only)
-    - type: document type (pdf/txt)
+    - tables: number of tables read (DOCX only)
+    - type: document type (pdf/docx/txt/md/markdown)
     """
     
     @staticmethod
@@ -121,7 +133,9 @@ class DocumentLoader:
                 page_content=text,
                 metadata={
                     "source": file_path.name,
-                    "type": "txt",
+                    # The real extension, not "txt": Markdown also comes
+                    # through here, and the document listing shows this.
+                    "type": file_path.suffix.lower().lstrip(".") or "txt",
                     "file_path": str(file_path),
                     "char_count": len(text),
                     "encoding": encoding
@@ -138,6 +152,70 @@ class DocumentLoader:
             logger.error(f"❌ Error loading TXT {file_path.name}: {str(e)}")
             raise
     
+    @staticmethod
+    def load_docx(file_path: str) -> List[Document]:
+        """Load a .docx, including the text inside its tables.
+
+        Tables matter more than they look: in the business documents this is
+        aimed at, the rates, dates and headcounts a person asks about are
+        usually in a table, and python-docx does not include table text in
+        document.paragraphs. Reading only paragraphs would index the prose
+        around the answer and not the answer.
+
+        Headers, footers and footnotes are not read. Saying so is better than
+        implying a completeness that is not there.
+        """
+        file_path = Path(file_path)
+
+        if not file_path.exists():
+            raise FileNotFoundError(f"DOCX file not found: {file_path}")
+
+        try:
+            logger.info(f"Loading DOCX: {file_path.name}")
+
+            document = DocxDocument(str(file_path))
+
+            blocks = [p.text.strip() for p in document.paragraphs if p.text.strip()]
+
+            for table in document.tables:
+                for row in table.rows:
+                    cells = [cell.text.strip() for cell in row.cells]
+                    # Deduplicate merged cells, which python-docx repeats once
+                    # per column they span.
+                    unique = []
+                    for cell in cells:
+                        if cell and (not unique or cell != unique[-1]):
+                            unique.append(cell)
+                    if unique:
+                        blocks.append(" | ".join(unique))
+
+            text = "\n\n".join(blocks)
+
+            if not text.strip():
+                raise ValueError(f"DOCX appears to contain no text: {file_path.name}")
+
+            documents = [Document(
+                page_content=text,
+                metadata={
+                    "source": file_path.name,
+                    "type": "docx",
+                    "file_path": str(file_path),
+                    "char_count": len(text),
+                    "paragraphs": len(document.paragraphs),
+                    "tables": len(document.tables),
+                }
+            )]
+
+            logger.info(
+                f"Loaded {len(text)} characters from {file_path.name} "
+                f"({len(document.tables)} table(s))"
+            )
+            return documents
+
+        except Exception as e:
+            logger.error(f"Error loading DOCX {file_path.name}: {str(e)}")
+            raise
+
     @classmethod
     def load_document(cls, file_path: str) -> List[Document]:
         """
@@ -160,17 +238,29 @@ class DocumentLoader:
             raise FileNotFoundError(f"File not found: {file_path}")
         
         extension = file_path.suffix.lower()
-        
+
         if extension == ".pdf":
             return cls.load_pdf(str(file_path))
-        elif extension == ".txt":
+        if extension == ".docx":
+            return cls.load_docx(str(file_path))
+        if extension in TEXT_EXTENSIONS:
+            # Markdown goes through the text loader unchanged. Its syntax
+            # carries meaning a reader relies on - headings say what a section
+            # is about, list items keep items apart - so stripping it to bare
+            # prose would lose structure the model can use.
             return cls.load_txt(str(file_path))
-        else:
-            supported = [".pdf", ".txt"]
+        if extension == ".doc":
+            # The pre-2007 binary format, which python-docx cannot read. People
+            # will try it, so say what to do instead of "unsupported format".
             raise ValueError(
-                f"Unsupported file format: {extension}\n"
-                f"Supported formats: {', '.join(supported)}"
+                "The old .doc format is not supported. Open it and save as "
+                ".docx, or export it to PDF."
             )
+
+        raise ValueError(
+            f"Unsupported file format: {extension}\n"
+            f"Supported formats: {', '.join(SUPPORTED_EXTENSIONS)}"
+        )
     
     @staticmethod
     def get_document_info(documents: List[Document]) -> dict:
