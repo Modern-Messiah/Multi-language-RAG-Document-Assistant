@@ -9,6 +9,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.security import APIKeyHeader
+from openai import APITimeoutError, RateLimitError
 
 from app.config import Settings, get_settings
 from app.models.schemas import QueryRequest, QueryResponse
@@ -37,6 +38,11 @@ PLACEHOLDER_API_KEYS = frozenset({
 # the 255-byte filename limit of common filesystems.
 MAX_STEM_BYTES = 150
 MAX_EXT_LEN = 10
+
+
+def _openai_timeout(request: Request) -> float:
+    """The configured OpenAI timeout, for log messages."""
+    return request.app.state.settings.openai_timeout
 
 
 def human_size(num_bytes: int) -> str:
@@ -122,6 +128,9 @@ async def lifespan(app: FastAPI):
         persist_directory=str(settings.chroma_persist_dir),
         embedding_model=settings.embedding_model,
         api_key=settings.openai_api_key,
+        timeout=settings.openai_timeout,
+        max_retries=settings.openai_max_retries,
+        base_url=settings.openai_base_url,
     )
     app.state.vectorstore = app.state.embeddings.get_vectorstore(
         settings.collection_name
@@ -132,6 +141,10 @@ async def lifespan(app: FastAPI):
         top_k=settings.top_k_results,
         temperature=settings.temperature,
         api_key=settings.openai_api_key,
+        max_answer_tokens=settings.max_answer_tokens,
+        timeout=settings.openai_timeout,
+        max_retries=settings.openai_max_retries,
+        base_url=settings.openai_base_url,
     )
     yield
 
@@ -164,8 +177,14 @@ def __getattr__(name):
 # =========================
 # Upload endpoint
 # =========================
+# Deliberately `def`, not `async def`: the body is fully synchronous - it reads
+# the upload, calls OpenAI to embed and writes to ChromaDB, none of which yield.
+# As a coroutine it ran ON the event loop, so one slow upload froze every other
+# request in the process, /health included, and the compose healthcheck then
+# restarted a backend that was merely busy. FastAPI runs a plain `def` handler
+# in a threadpool instead.
 @router.post("/upload")
-async def upload_document(
+def upload_document(
     request: Request,
     file: UploadFile = File(...),
     user_id: str = USER_ID_QUERY,
@@ -196,7 +215,10 @@ async def upload_document(
     if file.size is not None and file.size > settings.max_file_size:
         raise too_large()
 
-    contents = await file.read()
+    # file.file is the SpooledTemporaryFile starlette already parsed the body
+    # into; reading it directly is the synchronous equivalent of await
+    # file.read() and is what lets this handler stay off the event loop.
+    contents = file.file.read()
 
     if len(contents) == 0:
         raise HTTPException(
@@ -285,21 +307,39 @@ async def upload_document(
     }
 
 
+# `def`, not `async def` - see the note on upload_document. The chain's OpenAI
+# calls are synchronous, so as a coroutine this blocked the whole event loop.
 @router.post("/query", response_model=QueryResponse)
-async def query_rag(request: Request, payload: QueryRequest):
+def query_rag(request: Request, payload: QueryRequest):
     try:
         return request.app.state.rag_chain.ask(
             question=payload.question,
             language=payload.language,
             user_id=payload.user_id,
         )
+    except RateLimitError as exc:
+        # A quota or rate-limit rejection is retryable and temporary; saying so
+        # lets a client back off instead of treating it as a broken backend.
+        logger.warning("OpenAI rate limited the request: %s", exc)
+        raise HTTPException(
+            status_code=429,
+            detail="Upstream model is rate limited. Please retry shortly.",
+            headers={"Retry-After": "20"},
+        )
+    except APITimeoutError:
+        logger.warning("OpenAI timed out after %ss", _openai_timeout(request))
+        raise HTTPException(
+            status_code=504, detail="The model did not answer in time. Please retry."
+        )
     except Exception:
         logger.exception("Query failed")
         raise HTTPException(status_code=503, detail="Query failed")
 
 
+# `def`, not `async def`: deleting from ChromaDB and rmtree-ing the upload
+# directory are both blocking calls.
 @router.post("/clear")
-async def clear_documents(request: Request, user_id: str = USER_ID_QUERY):
+def clear_documents(request: Request, user_id: str = USER_ID_QUERY):
     state = request.app.state
     settings: Settings = state.settings
 

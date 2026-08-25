@@ -34,6 +34,22 @@ class Settings(BaseSettings):
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     top_k_results: int = Field(default=5, ge=1)
 
+    # Cap on generated answer length. Without one the model can produce an
+    # unbounded completion at the operator's expense, and a long answer is
+    # also what used to blow past Telegram's 4096-character message limit.
+    max_answer_tokens: int = Field(default=1000, ge=1)
+
+    # --- OpenAI transport ---
+    # The SDK defaults to a 600 s read timeout while our own clients give up
+    # after 60-120 s, so the server held threads for requests nobody was
+    # waiting on any more. Keep this below the client timeouts.
+    openai_timeout: float = Field(default=45.0, gt=0)
+    openai_max_retries: int = Field(default=2, ge=0)
+    # Set for Azure OpenAI or an OpenAI-compatible endpoint (vLLM, Ollama).
+    # An explicit field is required because pydantic-settings reads .env
+    # without exporting it, so the SDK's own env fallback never fires.
+    openai_base_url: str = ""
+
     # --- Chunking ---
     chunk_size: int = Field(default=1000, ge=1)
     chunk_overlap: int = Field(default=200, ge=0)

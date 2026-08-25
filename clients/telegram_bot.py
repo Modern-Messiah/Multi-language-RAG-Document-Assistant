@@ -5,7 +5,7 @@ import os
 import httpx
 from dotenv import load_dotenv
 from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
-from telegram.constants import FileSizeLimit
+from telegram.constants import ChatAction, FileSizeLimit, MessageLimit
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -43,6 +43,12 @@ BACKEND_HEADERS = api_headers()
 # Auto plus every language the chain actually has a rule for.
 LANGUAGES = list(SUPPORTED_LANGUAGES)
 
+# The backend gives OpenAI 45 s and may retry, so a 60 s client timeout could
+# abandon a request the server was still going to answer.
+QUERY_TIMEOUT = 120.0
+UPLOAD_TIMEOUT = 120.0
+CLEAR_TIMEOUT = 30.0
+
 # Copying .env.template without editing it leaves these in place, and because
 # they are non-empty the bot used to sail past its own "token missing" check
 # and die inside python-telegram-bot with an opaque InvalidToken.
@@ -50,6 +56,64 @@ PLACEHOLDER_TOKENS = frozenset({
     "your-telegram-bot-token-here",
     "your-token-here",
 })
+
+
+# Room inside a message for the "<b>Answer (2/3):</b>\n" heading.
+_CHUNK_BUDGET = MessageLimit.MAX_TEXT_LENGTH - 200
+
+
+def _escaped_length(text: str) -> int:
+    return len(html.escape(text))
+
+
+def split_for_telegram(text: str, budget: int = _CHUNK_BUDGET) -> list:
+    """Cut raw text into pieces whose HTML-escaped form fits one message.
+
+    Telegram rejects anything past MAX_TEXT_LENGTH, and the bot used to send
+    the whole answer in a single reply_html: a long answer raised BadRequest,
+    the generic handler swallowed it, and the user paid for an answer they
+    never saw.
+
+    Two subtleties drive the implementation. Escaping can quadruple a
+    character ("<" becomes "&lt;"), so the budget has to be measured on the
+    escaped form, not the raw one. And splitting AFTER escaping could cut an
+    entity in half, so the raw text is what gets divided.
+    """
+    text = text or ""
+    if _escaped_length(text) <= budget:
+        return [text]
+
+    chunks = []
+    remaining = text
+    while remaining:
+        if _escaped_length(remaining) <= budget:
+            chunks.append(remaining)
+            break
+
+        # Largest prefix that still fits once escaped.
+        low, high = 1, len(remaining)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if _escaped_length(remaining[:middle]) <= budget:
+                low = middle
+            else:
+                high = middle - 1
+        cut = low
+
+        # Prefer a natural boundary, but never give back more than half the
+        # chunk chasing one - a wall of text with no separators must still
+        # make progress.
+        window = remaining[:cut]
+        for separator in ("\n\n", "\n", ". ", " "):
+            index = window.rfind(separator)
+            if index > cut // 2:
+                cut = index + len(separator)
+                break
+
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:]
+
+    return chunks
 
 
 def backend_error(response) -> str:
@@ -102,7 +166,7 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear user documents."""
     user_id = str(update.effective_user.id)
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=CLEAR_TIMEOUT) as client:
             response = await client.post(
                 f"{BACKEND_URL}/clear",
                 params={"user_id": user_id},
@@ -142,12 +206,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text(f"Processing {file_name}...")
     
     try:
+        await update.message.chat.send_action(ChatAction.TYPING)
+
         # Get file from telegram
         tg_file = await context.bot.get_file(doc.file_id)
         file_bytes = await tg_file.download_as_bytearray()
         
         # Upload to FastAPI backend
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=UPLOAD_TIMEOUT) as client:
             files = {'file': (file_name, bytes(file_bytes))}
             params = {'user_id': str(update.effective_user.id)}
             response = await client.post(
@@ -192,7 +258,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     language = context.user_data.get("language", AUTO_LANGUAGE)
     
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        # Retrieval plus generation takes seconds; without this the chat looks
+        # like the bot ignored the question.
+        await update.message.chat.send_action(ChatAction.TYPING)
+
+        async with httpx.AsyncClient(timeout=QUERY_TIMEOUT) as client:
             payload = {
                 "question": text,
                 "language": language,
@@ -201,28 +271,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             response = await client.post(
                 f"{BACKEND_URL}/query", json=payload, headers=BACKEND_HEADERS
             )
-            
+
             if response.status_code == 200:
                 data = response.json()
                 answer = data.get("answer", "No answer found.")
                 sources = data.get("sources", [])
-                
+
                 # Escape before interpolating into HTML: both the answer and
                 # the source names derive from user-supplied documents, and a
                 # single stray "<" made Telegram reject the whole message
-                # with "can't parse entities".
-                msg = f"<b>Answer:</b>\n{html.escape(answer)}"
+                # with "can't parse entities". Split first, escape after, so
+                # an entity is never cut in half.
+                parts = split_for_telegram(answer)
+                for index, part in enumerate(parts, start=1):
+                    heading = "Answer" if len(parts) == 1 else f"Answer ({index}/{len(parts)})"
+                    await update.message.reply_html(
+                        f"<b>{heading}:</b>\n{html.escape(part)}"
+                    )
 
                 if sources:
-                    msg += "\n\n<b>Sources:</b>"
+                    lines = ["<b>Sources:</b>"]
                     for src in sources:
                         name = html.escape(str(src.get("source", "unknown")))
-                        msg += f"\n• <i>{name}</i>"
-                
-                await update.message.reply_html(msg)
+                        lines.append(f"• <i>{name}</i>")
+                    # Sent separately so a long answer cannot push the sources
+                    # over the limit and lose them.
+                    await update.message.reply_html("\n".join(lines))
             else:
                 await update.message.reply_text(f"❌ {backend_error(response)}")
-                
+
     except Exception as e:
         logger.error(f"Error handling query: {e}")
         await update.message.reply_text("❌ An error occurred while processing your question.")
