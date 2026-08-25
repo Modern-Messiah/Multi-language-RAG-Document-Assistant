@@ -21,18 +21,28 @@ from fastapi import (
 from fastapi import (
     Path as PathParam,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from openai import APITimeoutError, RateLimitError
 
 from app.config import Settings, get_settings
+from app.feedback import FeedbackStorageFull, store_from_settings
 from app.models.schemas import (
     ClearResponse,
     DeleteResponse,
     DocumentListResponse,
+    FeedbackRequest,
+    FeedbackResponse,
     QueryRequest,
     QueryResponse,
     UploadResponse,
+)
+from app.observability import (
+    REQUEST_ID_HEADER,
+    RequestContextMiddleware,
+    configure_logging,
+    readiness,
+    request_id_of,
 )
 from app.rag.chain import RAGChain
 from app.rag.document_loader import SUPPORTED_EXTENSIONS, DocumentLoader
@@ -127,10 +137,7 @@ router = APIRouter(dependencies=[Depends(require_api_key)])
 async def lifespan(app: FastAPI):
     settings: Settings = app.state.settings
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
+    configure_logging()
 
     if not settings.backend_api_key:
         logger.warning(
@@ -143,6 +150,9 @@ async def lifespan(app: FastAPI):
         )
 
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
+
+    # None when FEEDBACK_ENABLED is off, which is what the endpoint checks.
+    app.state.feedback = store_from_settings(settings)
 
     app.state.loader = DocumentLoader()
     app.state.chunker = TextChunker(
@@ -187,10 +197,44 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     )
     application.state.settings = settings or get_settings()
     application.include_router(router)
+    application.add_middleware(RequestContextMiddleware)
 
     @application.get("/health")
     async def health():
+        """Liveness only: the process is answering. Says nothing about whether
+        it can serve a query - that is what /ready is for."""
         return {"status": "ok", "version": application.version}
+
+    # Deliberately `def`: the readiness check reads from ChromaDB, which blocks.
+    # As a coroutine it would run on the event loop and a slow disk would stall
+    # every other request while answering a probe.
+    @application.get("/ready")
+    def ready():
+        """Whether the components a request needs are usable.
+
+        Unauthenticated, like /health: an orchestrator's probe has no API key.
+        It therefore reports check names and pass/fail, never why.
+        """
+        ok, checks = readiness(application.state)
+        body = {"status": "ready" if ok else "not ready", "checks": checks}
+        return JSONResponse(body, status_code=200 if ok else 503)
+
+    @application.exception_handler(Exception)
+    async def unhandled_error(request: Request, exc: Exception):
+        """Answer a crash in JSON, naming the request.
+
+        Without this, an unhandled exception produced a plain-text 500 from the
+        server itself, outside this app's middleware - so the response carried
+        no request id, and the one failure a user most needs to report was the
+        one they could not point at. The exception still propagates for the
+        server to log and for tests to see.
+        """
+        request_id = request_id_of(request)
+        return JSONResponse(
+            {"detail": "Internal server error", "request_id": request_id},
+            status_code=500,
+            headers={REQUEST_ID_HEADER: request_id},
+        )
 
     return application
 
@@ -560,3 +604,50 @@ def delete_document(
         file_hash=file_hash,
         chunks_removed=removed,
     )
+
+
+# =========================
+# Answer feedback
+# =========================
+# Deliberately `def`: it appends to a file, which blocks.
+@router.post("/feedback", response_model=FeedbackResponse)
+def submit_feedback(request: Request, payload: FeedbackRequest):
+    """Record one rating of one answer.
+
+    The golden set the evaluation harness measures against was written by
+    guessing what people would ask. A rating carries the real question, the
+    answer and the sources behind it, so a complaint becomes a case that can be
+    measured instead of a story.
+    """
+    store = getattr(request.app.state, "feedback", None)
+    if store is None:
+        # FEEDBACK_ENABLED is off: the feature does not exist in this
+        # deployment, which is what 404 says. Nothing is created on disk.
+        raise HTTPException(status_code=404, detail="Feedback collection is disabled")
+
+    try:
+        store.record(
+            rating=payload.rating,
+            user_id=payload.user_id,
+            question=payload.question,
+            answer=payload.answer,
+            sources=payload.sources,
+            request_id=payload.request_id,
+            comment=payload.comment,
+            language=payload.language,
+            client=payload.client,
+        )
+    except FeedbackStorageFull:
+        logger.warning(
+            "Feedback storage is full at %s bytes; rotate the file",
+            request.app.state.settings.feedback_max_bytes,
+        )
+        raise HTTPException(
+            status_code=507,
+            detail="Feedback storage is full. The operator needs to rotate it.",
+        )
+    except OSError:
+        logger.exception("Could not write feedback")
+        raise HTTPException(status_code=503, detail="Feedback storage unavailable")
+
+    return FeedbackResponse(message="Thanks - recorded.")

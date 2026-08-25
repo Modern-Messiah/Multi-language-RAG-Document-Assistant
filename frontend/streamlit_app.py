@@ -18,10 +18,12 @@ from app.rag.document_loader import (  # noqa: E402  (must follow the sys.path f
     SUPPORTED_EXTENSIONS,
 )
 from clients.backend import (  # noqa: E402
+    REQUEST_ID_HEADER,
     SUPPORTED_LANGUAGES,
     api_headers,
     backend_url,
     error_from_response,
+    feedback_enabled,
     max_file_mb,
 )
 
@@ -36,6 +38,10 @@ API_URL = backend_url()
 # Mirrors the backend's MAX_FILE_SIZE so the UI never advertises a limit the
 # API will not honour (the two read the same .env).
 MAX_FILE_MB = max_file_mb()
+
+# Rating buttons under each answer. Off means they are not drawn at all, rather
+# than drawn and answered with a 404.
+FEEDBACK_ENABLED = feedback_enabled()
 
 # Turns sent with a question. The backend caps this again with
 # MAX_HISTORY_TURNS; this is about not shipping a transcript that grows
@@ -366,7 +372,76 @@ else:
 transcript = st.session_state.setdefault("transcript", [])
 
 
-def render_turn(turn):
+def send_feedback(turn, rating, key):
+    """Post one rating, then remember it so the buttons are not offered twice."""
+    given = st.session_state.setdefault("feedback_given", {})
+    try:
+        response = requests.post(
+            f"{API_URL}/feedback",
+            json={
+                "rating": rating,
+                "user_id": USER_ID,
+                "question": turn["question"],
+                "answer": turn["answer"],
+                # Filenames only: a golden case is written in terms of
+                # documents, and the previews would bloat the record.
+                "sources": [s["source"] for s in turn.get("sources") or []],
+                "request_id": turn.get("request_id"),
+                "language": turn.get("language", ""),
+                "client": "web",
+            },
+            headers=HEADERS,
+            timeout=15,
+        )
+    except requests.RequestException as e:
+        st.warning(f"Could not send that: {e}")
+        return
+
+    if response.status_code != 200:
+        st.warning(backend_error(response))
+        return
+
+    given[key] = rating
+    # Redraw so the buttons give way to the acknowledgement. The click already
+    # triggered this run and the buttons were emitted higher up in it, so
+    # without an explicit rerun they stay on screen - and stay clickable - until
+    # the user does something else. Not covered by a test: AppTest reruns the
+    # script itself on click, which hides the difference.
+    st.rerun()
+
+
+def render_feedback(index, turn):
+    """Two buttons under one answer.
+
+    Keyed by position in the transcript, which is stable across reruns - a key
+    derived from the text would collide the moment the same question was asked
+    twice.
+    """
+    if not FEEDBACK_ENABLED:
+        return
+
+    key = f"feedback_{index}"
+    given = st.session_state.setdefault("feedback_given", {})
+    if key in given:
+        st.caption("👍 Thanks - recorded." if given[key] == "up"
+                   else "👎 Thanks - recorded. This answer will be looked at.")
+        return
+
+    up, down, _ = st.columns([1, 1, 8])
+    if up.button("👍", key=f"{key}_up", help="This answer was useful"):
+        send_feedback(turn, "up", key)
+    if down.button("👎", key=f"{key}_down", help="This answer was wrong or unhelpful"):
+        send_feedback(turn, "down", key)
+
+
+def render_sources(sources):
+    with st.expander(f"📚 {len(sources)} source(s)"):
+        for src in sources:
+            st.markdown(f"**{src['source']}**")
+            st.caption(src["preview"])
+
+
+def render_turn(index, turn):
     """Replay one exchange as chat bubbles.
 
     st.chat_message renders in the viewer's Streamlit theme. The old answer box
@@ -378,14 +453,12 @@ def render_turn(turn):
     with st.chat_message("assistant"):
         st.markdown(turn["answer"])
         if turn.get("sources"):
-            with st.expander(f"📚 {len(turn['sources'])} source(s)"):
-                for src in turn["sources"]:
-                    st.markdown(f"**{src['source']}**")
-                    st.caption(src["preview"])
+            render_sources(turn["sources"])
+        render_feedback(index, turn)
 
 
-for past_turn in transcript:
-    render_turn(past_turn)
+for past_index, past_turn in enumerate(transcript):
+    render_turn(past_index, past_turn)
 
 question = st.chat_input(
     "Ask about your documents"
@@ -454,15 +527,21 @@ if question and question.strip():
             st.warning(collected["error"])
 
         if collected["sources"]:
-            with st.expander(f"📚 {len(collected['sources'])} source(s)"):
-                for src in collected["sources"]:
-                    st.markdown(f"**{src['source']}**")
-                    st.caption(src["preview"])
+            render_sources(collected["sources"])
 
-    transcript.append(
-        {
-            "question": question,
-            "answer": answer,
-            "sources": collected["sources"],
-        }
-    )
+        transcript.append(
+            {
+                "question": question,
+                "answer": answer,
+                "sources": collected["sources"],
+                "language": language,
+                # From the response header: the thread back to the log lines
+                # that produced this answer, sent along with a rating.
+                "request_id": response.headers.get(REQUEST_ID_HEADER),
+            }
+        )
+
+        # Drawn here as well as in render_turn: the answer just streamed has not
+        # been through a rerun yet, and buttons that only appear after the next
+        # click would be asking for a rating of the previous answer.
+        render_feedback(len(transcript) - 1, transcript[-1])
