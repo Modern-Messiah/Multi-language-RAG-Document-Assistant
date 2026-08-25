@@ -158,6 +158,8 @@ class FakeChatClient:
         class _Completions:
             def create(self, **kwargs):
                 outer.calls.append(kwargs)
+                if kwargs.get("stream"):
+                    return outer._chunks()
                 return SimpleNamespace(
                     choices=[
                         SimpleNamespace(
@@ -169,6 +171,21 @@ class FakeChatClient:
                 )
 
         self.chat = SimpleNamespace(completions=_Completions())
+
+    def _chunks(self):
+        """The answer in two pieces, shaped like an OpenAI stream."""
+        midpoint = max(1, len(self.answer) // 2)
+        pieces = [self.answer[:midpoint], self.answer[midpoint:]]
+        last = len(pieces) - 1
+        for index, piece in enumerate(pieces):
+            yield SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content=piece),
+                        finish_reason=self.finish_reason if index == last else None,
+                    )
+                ]
+            )
 
 
 def make_settings(tmp_path, **overrides):

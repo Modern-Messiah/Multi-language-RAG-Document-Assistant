@@ -303,6 +303,30 @@ Asks a question against the indexed documents.
     -   `504` - the model did not answer within `OPENAI_TIMEOUT`. Retryable.
     -   `503` - retrieval or generation failed for another reason.
 
+### `POST /query/stream`
+The same question, answered as it is generated. `/query` is unchanged; this is
+an addition.
+
+-   **Body**: identical to `/query`.
+-   **Response**: `text/event-stream`. Each event is a `data:` line holding one
+    JSON object:
+    ```
+    data: {"type": "sources", "sources": [{"id": 1, "source": "report.pdf", "preview": "..."}]}
+    data: {"type": "token", "text": "Revenue "}
+    data: {"type": "token", "text": "grew "}
+    data: {"type": "done"}
+    ```
+    Sources arrive **first**, before any token: they are known as soon as
+    retrieval finishes. Concatenating every `token` gives the same answer
+    `/query` would have returned.
+-   **Errors**: retrieval and the condensing call a follow-up needs both happen
+    before the first byte, so their failures are ordinary status codes -
+    `401`, `422`, `429`, `504`, `503`, exactly as on `/query`. A failure *after*
+    the response has started cannot change a status line that is already sent,
+    so it arrives as a final `{"type": "error", "detail": "..."}` event.
+-   The response sets `Cache-Control: no-cache` and `X-Accel-Buffering: no`;
+    a proxy that buffers the body defeats the entire feature.
+
 ### `GET /documents`
 Lists what this `user_id` has indexed, one entry per document rather than per chunk.
 -   **Query Parameters**: `user_id` (**required**).
@@ -397,6 +421,21 @@ variable of the same name, read from `.env` or the process environment.
 Invalid combinations are rejected at startup rather than at first use - for example
 `CHUNK_OVERLAP >= CHUNK_SIZE`, a negative `TOP_K_RESULTS`, or a non-ASCII
 `BACKEND_API_KEY` (HTTP headers cannot carry non-ASCII, so such a key could never match).
+
+### Streaming
+
+The Streamlit UI uses `/query/stream`, so an answer appears word by word
+instead of after a five to fifteen second pause on a motionless spinner. The
+Telegram bot deliberately does not: streaming there means editing a message
+repeatedly, which runs into Telegram's edit rate limits, and the typing
+indicator already tells the user something is happening.
+
+Citation markers are stripped from the stream as it passes. That needs more
+than the regex `/query` uses, because `[1]` can arrive as `[`, `1`, `]` in
+three separate chunks and a per-chunk regex would let all three through. The
+filter holds back only what could still become a marker, so at most a few
+characters are ever delayed, and an unterminated `[12` at the end of a stream
+is released as the real text it turned out to be.
 
 ### Follow-up questions
 

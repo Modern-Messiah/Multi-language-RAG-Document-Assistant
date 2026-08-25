@@ -24,6 +24,50 @@ logger = logging.getLogger(__name__)
 CONDENSE_MAX_TOKENS = 200
 
 
+NO_CONTEXT_ANSWER = "No relevant information found."
+
+# A citation marker: an opening bracket, digits, a closing bracket.
+_CITATION = re.compile(r"\[\d+\]")
+# A prefix of one that has not finished arriving yet.
+_PARTIAL_CITATION = re.compile(r"\[\d*$")
+
+
+class CitationStripper:
+    """Removes [1]-style markers from text arriving in pieces.
+
+    The prompt asks the model not to emit them and ask() strips whatever slips
+    through, but a stream cannot: "[1]" can arrive as "[", "1", "]" across
+    three chunks, and a regex applied per chunk would pass all three through.
+
+    Anything that might still turn into a marker is held back until the next
+    chunk settles it, so at most a few characters are ever delayed.
+    """
+
+    def __init__(self):
+        self._pending = ""
+
+    def feed(self, text: str) -> str:
+        """Text safe to emit now."""
+        buffer = _CITATION.sub("", self._pending + text)
+
+        held = _PARTIAL_CITATION.search(buffer)
+        if held:
+            self._pending = buffer[held.start():]
+            return buffer[: held.start()]
+
+        self._pending = ""
+        return buffer
+
+    def flush(self) -> str:
+        """Whatever was held back, once the stream is over.
+
+        An unterminated "[12" was never a citation, so it is real text and the
+        user should see it.
+        """
+        remaining, self._pending = self._pending, ""
+        return remaining
+
+
 # =========================
 # Base system prompt
 # =========================
@@ -308,15 +352,35 @@ class RAGChain:
         return "\n".join(lines)
 
     # =========================
-    # Main RAG method
+    # Preparing a request
     # =========================
-    def ask(
-        self,
-        question: str,
-        language: str = AUTO_LANGUAGE,
-        user_id: str = None,
-        history=None,
-    ) -> Dict:
+    def _collect_sources(self, docs: List[Document]) -> List[Dict]:
+        """One entry per distinct source file, numbered from 1."""
+        sources = []
+        seen = set()
+
+        for doc in docs:
+            src = doc.metadata.get("source", "unknown")
+            if src in seen:
+                continue
+            seen.add(src)
+            sources.append({
+                "id": len(sources) + 1,
+                "source": src,
+                "preview": doc.page_content[:200],
+            })
+
+        return sources
+
+    def _prepare(self, question, language, user_id, history):
+        """Retrieve and build the chat request.
+
+        Shared by ask() and ask_stream() so the two cannot drift: a prompt
+        change that reached only one of them would give the same question two
+        different answers depending on which endpoint was called.
+
+        Returns (request, sources); request is None when nothing was retrieved.
+        """
         # A falsy user_id used to mean "no filter", i.e. search every tenant's
         # documents. No caller wants that, so make it impossible rather than
         # leaving a cross-tenant read one missing argument away.
@@ -330,13 +394,9 @@ class RAGChain:
         docs = self._retrieve(search_query, filter_dict)
 
         if not docs:
-            return {
-                "answer": "No relevant information found.",
-                "sources": []
-            }
+            return None, []
 
         context = self._build_context(docs)
-
         lang_rule = rule_for(language)
 
         system_prompt = f"""
@@ -370,33 +430,98 @@ Answer:
         if self.max_answer_tokens is not None:
             request["max_tokens"] = self.max_answer_tokens
 
+        return request, self._collect_sources(docs)
+
+    # =========================
+    # Main RAG method
+    # =========================
+    def ask(
+        self,
+        question: str,
+        language: str = AUTO_LANGUAGE,
+        user_id: str = None,
+        history=None,
+    ) -> Dict:
+        request, sources = self._prepare(question, language, user_id, history)
+
+        if request is None:
+            return {"answer": NO_CONTEXT_ANSWER, "sources": []}
+
         response = self.client.chat.completions.create(**request)
         self._log_usage(response, user_id)
 
-        raw_answer = response.choices[0].message.content.strip()
-        answer = self._strip_citations(raw_answer)
-
-        # =========================
-        # Collect unique sources
-        # =========================
-        sources = []
-        seen = set()
-        sid = 1
-
-        for doc in docs:
-            src = doc.metadata.get("source", "unknown")
-            if src in seen:
-                continue
-            seen.add(src)
-
-            sources.append({
-                "id": sid,
-                "source": src,
-                "preview": doc.page_content[:200]
-            })
-            sid += 1
+        raw_answer = (response.choices[0].message.content or "").strip()
 
         return {
-            "answer": answer,
-            "sources": sources
+            "answer": self._strip_citations(raw_answer),
+            "sources": sources,
         }
+
+    # =========================
+    # Streaming
+    # =========================
+    def ask_stream(
+        self,
+        question: str,
+        language: str = AUTO_LANGUAGE,
+        user_id: str = None,
+        history=None,
+    ):
+        """Yield the answer as it is generated.
+
+        Five to fifteen seconds of a motionless spinner was the most visible
+        latency in the product. Retrieval still happens up front - so a failure
+        there is a normal HTTP error rather than something the client has to
+        dig out of a half-delivered stream - and the sources go out first,
+        since they are known before a single token is generated.
+
+        Events are dicts, each one an SSE payload:
+            {"type": "sources", "sources": [...]}
+            {"type": "token", "text": "..."}
+            {"type": "done"}
+        """
+        request, sources = self._prepare(question, language, user_id, history)
+
+        yield {"type": "sources", "sources": sources}
+
+        if request is None:
+            yield {"type": "token", "text": NO_CONTEXT_ANSWER}
+            yield {"type": "done"}
+            return
+
+        stripper = CitationStripper()
+        stream = self.client.chat.completions.create(**request, stream=True)
+
+        finish_reason = None
+        for chunk in stream:
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            finish_reason = getattr(choices[0], "finish_reason", None) or finish_reason
+            delta = getattr(getattr(choices[0], "delta", None), "content", None)
+            if not delta:
+                continue
+            text = stripper.feed(delta)
+            if text:
+                yield {"type": "token", "text": text}
+
+        tail = stripper.flush()
+        if tail:
+            yield {"type": "token", "text": tail}
+
+        # A streamed response carries no usage block, so the per-tenant cost
+        # line that ask() logs is not available here; finish_reason is.
+        logger.info(
+            "streamed completion user_id=%s model=%s finish_reason=%s",
+            user_id,
+            self.model,
+            finish_reason,
+        )
+        if finish_reason == "length":
+            logger.warning(
+                "Answer for user_id=%s was truncated at MAX_ANSWER_TOKENS=%s",
+                user_id,
+                self.max_answer_tokens,
+            )
+
+        yield {"type": "done"}
