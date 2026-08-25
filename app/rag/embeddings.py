@@ -88,6 +88,38 @@ class OpenAIEmbeddingFunction:
         return response.data[0].embedding
 
 
+# ChromaDB's default index space. Collections here are created without an
+# explicit "hnsw:space", so this is what they use.
+DEFAULT_SPACE = "l2"
+
+
+def distance_to_similarity(distance: float, space: str = DEFAULT_SPACE) -> Optional[float]:
+    """Convert a ChromaDB distance into cosine similarity in [-1, 1].
+
+    Thresholds have to be expressed in something a person can reason about,
+    and the raw number is neither intuitive nor comparable: for the default
+    squared-L2 space 0.0 means identical and 4.0 means opposite.
+
+    OpenAI embeddings are unit-normed, so squared L2 distance d relates to
+    cosine similarity exactly: d = 2 - 2*cos, hence cos = 1 - d/2.
+
+    Returns None when the space is not one this conversion covers - the caller
+    must then skip filtering rather than compare against a scale that does not
+    apply. langchain's own normaliser is avoided here because it treats the
+    squared distance as a plain one and happily returns negative "relevance"
+    with a warning attached.
+    """
+    if space == "l2":
+        return 1.0 - (distance / 2.0)
+    if space == "cosine":
+        # Chroma reports cosine DISTANCE, i.e. 1 - cos.
+        return 1.0 - distance
+    if space == "ip":
+        # Inner product on unit vectors is already the cosine, negated.
+        return -distance
+    return None
+
+
 class EmbeddingsManager:
     """
     Manage embeddings generation and vector store operations.
@@ -347,6 +379,16 @@ class EmbeddingsManager:
         clauses += [{key: {"$eq": value}} for key, value in equals.items()]
         return clauses[0] if len(clauses) == 1 else {"$and": clauses}
 
+    def index_space(self) -> str:
+        """Which distance metric the open collection indexes with.
+
+        Read from metadata rather than assumed: a collection created elsewhere
+        with "hnsw:space" set would make the distance conversion wrong, and a
+        wrong conversion silently discards the best matches.
+        """
+        metadata = (self.collection.metadata if self.collection else None) or {}
+        return metadata.get("hnsw:space", DEFAULT_SPACE)
+
     def list_documents(self, owner: str) -> List[dict]:
         """Everything this owner has indexed, one entry per document.
 
@@ -465,17 +507,26 @@ class EmbeddingsManager:
     def similarity_search_with_score(
         self,
         query: str,
-        k: int = 3
+        k: int = 3,
+        filter: Optional[dict] = None,
     ) -> List[tuple]:
         """
-        Search with relevance scores
+        Search with distance scores.
+
+        The score is a DISTANCE, not a similarity: ChromaDB's default space is
+        squared L2, so 0.0 means identical and larger means further apart.
+        Use distance_to_similarity() to get something a person can threshold.
 
         Args:
             query: Search query text
             k: Number of results to return
+            filter: Metadata filter. Not optional in practice - this method had
+                no filter parameter at all, so any caller would have searched
+                across every tenant. It had none yet, which is the only reason
+                that was never a live leak.
 
         Returns:
-            List of (Document, score) tuples
+            List of (Document, distance) tuples
         """
         if self.vectorstore is None:
             raise ValueError("No vectorstore loaded")
@@ -483,7 +534,8 @@ class EmbeddingsManager:
         try:
             results = self.vectorstore.similarity_search_with_score(
                 query=query,
-                k=k
+                k=k,
+                filter=filter,
             )
 
             logger.info(

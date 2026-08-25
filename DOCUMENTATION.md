@@ -376,6 +376,7 @@ variable of the same name, read from `.env` or the process environment.
 | `EMBEDDING_MODEL` | OpenAI embedding model. Recorded in the collection; changing it against an existing collection is refused at startup. | `text-embedding-3-small` |
 | `TEMPERATURE` | Sampling temperature, `0.0`–`2.0`. | `0.0` |
 | `TOP_K_RESULTS` | Chunks retrieved per question, `>= 1`. | `5` |
+| `RELEVANCE_THRESHOLD` | Cosine similarity a chunk must reach to enter the prompt, `0.0`-`1.0`. `0` keeps every candidate. | `0.0` |
 | `MAX_ANSWER_TOKENS` | Cap on generated answer length, `>= 1`. Without it a completion is unbounded at your expense. | `1000` |
 | `OPENAI_TIMEOUT` | Seconds the OpenAI client waits. Keep it below the clients' own timeouts. | `45.0` |
 | `OPENAI_MAX_RETRIES` | Retries the OpenAI client makes on a transient failure. | `2` |
@@ -392,6 +393,32 @@ variable of the same name, read from `.env` or the process environment.
 Invalid combinations are rejected at startup rather than at first use - for example
 `CHUNK_OVERLAP >= CHUNK_SIZE`, a negative `TOP_K_RESULTS`, or a non-ASCII
 `BACKEND_API_KEY` (HTTP headers cannot carry non-ASCII, so such a key could never match).
+
+### Relevance filtering
+
+Retrieval returns `TOP_K_RESULTS` chunks whether or not the corpus has anything
+to do with the question, so asking about a topic you never uploaded still fills
+the prompt with your nearest unrelated paragraphs. `RELEVANCE_THRESHOLD` drops
+candidates below a cosine similarity; when everything is dropped the API answers
+`"No relevant information found."` without calling the model at all.
+
+It ships **disabled** (`0.0`) on purpose. The right value depends on the corpus
+and the embedding model, and one set too high discards relevant context - a
+failure far harder to notice than including too much. Every query logs what it
+saw, so the number can come from data:
+
+```
+retrieval space=l2 candidates=5 similarity_best=0.681 similarity_worst=0.104 threshold=0.0
+```
+
+Ask a few questions you know the answers to, and a few you know are not in the
+corpus, then pick a value between the two clusters.
+
+Note the scores ChromaDB returns are **distances**, not similarities - for the
+default `l2` space, `0.0` means identical. The conversion to cosine similarity
+(`1 - distance/2`, exact for unit-normed OpenAI embeddings) lives in
+`app/rag/embeddings.py`, and filtering disables itself with a warning if a
+collection uses an index space that conversion does not cover.
 
 ### Changing the embedding model
 
