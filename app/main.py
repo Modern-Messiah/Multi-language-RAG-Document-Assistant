@@ -169,6 +169,8 @@ async def lifespan(app: FastAPI):
         max_answer_tokens=settings.max_answer_tokens,
         relevance_threshold=settings.relevance_threshold,
         max_history_turns=settings.max_history_turns,
+        mmr_lambda=settings.mmr_lambda,
+        embeddings_manager=app.state.embeddings,
         timeout=settings.openai_timeout,
         max_retries=settings.openai_max_retries,
         base_url=settings.openai_base_url,

@@ -11,7 +11,7 @@ import httpx
 from langchain.schema import Document
 from openai import OpenAI
 
-from app.rag.embeddings import DEFAULT_SPACE, distance_to_similarity
+from app.rag.embeddings import DEFAULT_SPACE, distance_to_similarity, select_mmr
 from app.rag.languages import AUTO_LANGUAGE, LANG_RULES, rule_for
 
 # LANG_RULES is re-exported: it lived here first, and the clients now read the
@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 # A standalone question is one sentence; this only has to stop a runaway.
 CONDENSE_MAX_TOKENS = 200
+
+# How many candidates MMR gets to choose from, as a multiple of top_k. With no
+# slack it has nothing to trade relevance against.
+MMR_FETCH_MULTIPLIER = 4
 
 
 NO_CONTEXT_ANSWER = "No relevant information found."
@@ -95,6 +99,8 @@ class RAGChain:
         max_answer_tokens: Optional[int] = None,
         relevance_threshold: float = 0.0,
         max_history_turns: int = 0,
+        mmr_lambda: float = 1.0,
+        embeddings_manager=None,
         timeout: Optional[float] = None,
         max_retries: Optional[int] = None,
         base_url: str = "",
@@ -123,6 +129,12 @@ class RAGChain:
         # How many past exchanges inform retrieval and the answer. 0 disables
         # multi-turn entirely, which is how the chain behaved before.
         self.max_history_turns = max_history_turns
+        # 1.0 is pure relevance, i.e. MMR off. Lower trades some relevance for
+        # coverage of more than one passage.
+        self.mmr_lambda = mmr_lambda
+        # MMR needs candidate vectors, and only the manager can produce them.
+        self.embeddings_manager = embeddings_manager
+        self._warned_about_mmr = False
 
         if client is not None:
             self.client = client
@@ -193,6 +205,9 @@ class RAGChain:
         Scores are logged on every query even when filtering is off, so the
         threshold can be chosen from data rather than guessed.
         """
+        if self._mmr_enabled():
+            return self._retrieve_diverse(question, filter_dict)
+
         scored = self._search_with_scores(question, filter_dict)
         if scored is None:
             # A vector store without the scored API (or an injected double).
@@ -242,6 +257,74 @@ class RAGChain:
                 self.relevance_threshold,
             )
         return kept
+
+    def _mmr_enabled(self) -> bool:
+        """MMR needs candidate vectors, which only the manager can hand over.
+
+        Without one - every injected test double, and any store that is not
+        ChromaDB - retrieval stays on the plain scored path. Warned about once
+        rather than silently, because a knob that appears to be set and is not
+        is worse than one that is off.
+        """
+        if self.mmr_lambda >= 1.0:
+            return False
+        if self.embeddings_manager is None:
+            if not self._warned_about_mmr:
+                logger.warning(
+                    "MMR_LAMBDA=%s but no embeddings manager was provided - "
+                    "diversity re-ranking is inactive",
+                    self.mmr_lambda,
+                )
+                self._warned_about_mmr = True
+            return False
+        return True
+
+    def _retrieve_diverse(self, question: str, filter_dict: dict) -> List[Document]:
+        """Threshold first, then pick a diverse subset of what survived.
+
+        The order matters: MMR would otherwise spend one of its k slots on a
+        chunk that is merely different, rather than different *and* relevant.
+        """
+        owner = filter_dict["user_id"]
+        fetch_k = max(self.top_k, self.top_k * MMR_FETCH_MULTIPLIER)
+        candidates = self.embeddings_manager.search_candidates(question, fetch_k, owner)
+        if not candidates:
+            return []
+
+        space = self.embeddings_manager.index_space()
+        scored = []
+        for document, distance, vector in candidates:
+            similarity = distance_to_similarity(distance, space)
+            if similarity is None:
+                logger.warning(
+                    "Unknown index space %r - relevance filtering is disabled", space
+                )
+                similarity = 1.0
+            scored.append((document, similarity, vector))
+
+        logger.info(
+            "retrieval space=%s candidates=%d similarity_best=%.3f "
+            "similarity_worst=%.3f threshold=%s mmr_lambda=%s",
+            space,
+            len(scored),
+            max(s for _, s, _ in scored),
+            min(s for _, s, _ in scored),
+            self.relevance_threshold,
+            self.mmr_lambda,
+        )
+
+        if self.relevance_threshold:
+            kept = [c for c in scored if c[1] >= self.relevance_threshold]
+            if len(kept) != len(scored):
+                logger.info(
+                    "dropped %d/%d chunk(s) below RELEVANCE_THRESHOLD=%s",
+                    len(scored) - len(kept),
+                    len(scored),
+                    self.relevance_threshold,
+                )
+            scored = kept
+
+        return select_mmr(scored, self.top_k, self.mmr_lambda)
 
     def _search_with_scores(self, question: str, filter_dict: dict):
         """Scored search, or None when the store cannot do it."""

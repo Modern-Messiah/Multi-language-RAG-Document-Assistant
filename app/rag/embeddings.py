@@ -3,6 +3,7 @@ Embeddings Manager for RAG Assistant
 Handles vector generation and ChromaDB operations
 """
 import logging
+import math
 import os
 from pathlib import Path
 from typing import List, Optional
@@ -118,6 +119,55 @@ def distance_to_similarity(distance: float, space: str = DEFAULT_SPACE) -> Optio
         # Inner product on unit vectors is already the cosine, negated.
         return -distance
     return None
+
+
+def cosine_similarity(left: List[float], right: List[float]) -> float:
+    """Cosine between two vectors, 0.0 if either has no length."""
+    dot = sum(a * b for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(a * a for a in left))
+    right_norm = math.sqrt(sum(b * b for b in right))
+    if not left_norm or not right_norm:
+        return 0.0
+    return dot / (left_norm * right_norm)
+
+
+def select_mmr(candidates: List[tuple], k: int, lambda_mult: float) -> List:
+    """Maximal Marginal Relevance: relevant, but not all the same passage.
+
+    With overlapping chunks, the neighbours of a strong match are also strong
+    matches, so the top k can be one passage repeated - measured on a 9-chunk
+    corpus, a question spanning generation *and* storage returned five chunks
+    of the generation document and nothing about storage at all.
+
+    Each pick maximises `lambda * relevance - (1 - lambda) * closest_already_picked`.
+    lambda_mult of 1.0 is pure relevance, i.e. MMR switched off; lower values
+    trade relevance for coverage.
+
+    candidates: (item, relevance, vector), relevance already comparable.
+    Returns the chosen items, most relevant first.
+    """
+    if k <= 0 or not candidates:
+        return []
+    if lambda_mult >= 1.0:
+        return [item for item, _, _ in candidates[:k]]
+
+    remaining = list(candidates)
+    selected = []
+
+    while remaining and len(selected) < k:
+        best_index = 0
+        best_score = None
+        for index, (_, relevance, vector) in enumerate(remaining):
+            redundancy = max(
+                (cosine_similarity(vector, chosen_vector) for _, _, chosen_vector in selected),
+                default=0.0,
+            )
+            score = lambda_mult * relevance - (1.0 - lambda_mult) * redundancy
+            if best_score is None or score > best_score:
+                best_score, best_index = score, index
+        selected.append(remaining.pop(best_index))
+
+    return [item for item, _, _ in selected]
 
 
 class EmbeddingsManager:
@@ -378,6 +428,42 @@ class EmbeddingsManager:
         clauses = [{"user_id": {"$eq": owner}}]
         clauses += [{key: {"$eq": value}} for key, value in equals.items()]
         return clauses[0] if len(clauses) == 1 else {"$and": clauses}
+
+    def search_candidates(self, query: str, k: int, owner: str) -> List[tuple]:
+        """Candidates with their distances and their stored vectors.
+
+        One round trip returns all three, which is what keeps MMR free: the
+        alternative, embedding the candidate texts again to compare them with
+        each other, would double the embedding bill on every single question.
+
+        Returns [(Document, distance, vector)], nearest first.
+        """
+        if self.collection is None:
+            return []
+
+        result = self.collection.query(
+            query_embeddings=[self.embeddings.embed_query(query)],
+            n_results=k,
+            where=self._owned(owner),
+            include=["documents", "metadatas", "distances", "embeddings"],
+        )
+
+        texts = (result.get("documents") or [[]])[0]
+        metadatas = (result.get("metadatas") or [[]])[0]
+        distances = (result.get("distances") or [[]])[0]
+        vectors = (result.get("embeddings") or [[]])[0]
+
+        candidates = []
+        for index, text in enumerate(texts):
+            candidates.append((
+                Document(
+                    page_content=text,
+                    metadata=dict(metadatas[index] or {}) if index < len(metadatas) else {},
+                ),
+                distances[index] if index < len(distances) else 0.0,
+                list(vectors[index]) if index < len(vectors) else [],
+            ))
+        return candidates
 
     def index_space(self) -> str:
         """Which distance metric the open collection indexes with.

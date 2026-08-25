@@ -47,6 +47,18 @@ class Settings(BaseSettings):
     # 0 turns off multi-turn behaviour altogether.
     max_history_turns: int = Field(default=6, ge=0, le=20)
 
+    # Diversity of the retrieved chunks. 1.0 ranks by relevance alone; lower
+    # values cover more passages, which matters because overlapping chunks make
+    # the neighbours of a strong match strong matches too.
+    #
+    # Ships at 1.0 - off - on measured grounds, not caution. The measurement in
+    # DOCUMENTATION shows diversity buys recall on a question spanning two
+    # documents only once precision has already dropped from 0.60 to 0.35: a
+    # question about one topic then gets three unrelated chunks in its prompt.
+    # Which mix a given deployment sees is not something this repository can
+    # know, so the number is left to whoever can measure it.
+    mmr_lambda: float = Field(default=1.0, ge=0.0, le=1.0)
+
     # Cap on generated answer length. Without one the model can produce an
     # unbounded completion at the operator's expense, and a long answer is
     # also what used to blow past Telegram's 4096-character message limit.
