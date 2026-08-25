@@ -9,6 +9,10 @@ services:
     volumes:
       - data_uploads:/app/data/uploads
       - data_chroma:/app/data/chroma_db
+      # Collected ratings. Without a volume they lived in the container layer
+      # and were lost on the next `docker compose up --build`, which is a poor
+      # fate for the one thing users are asked to contribute.
+      - data_feedback:/app/data/feedback
     env_file:
       - .env
     ports:
@@ -71,3 +75,4 @@ networks:
 volumes:
   data_uploads:
   data_chroma:
+  data_feedback:

@@ -191,3 +191,37 @@ def test_the_compose_probe_is_the_endpoint_the_docs_describe():
         assert "**No authentication**" in DOCUMENTATION.split(f"### `GET {path}`")[1][:400], (
             f"{path} is probed without credentials, so it must be unauthenticated"
         )
+
+
+def test_every_documented_command_is_a_real_module():
+    """A copy-pasteable command that does not exist is worse than no command:
+    it is read as a promise that the tooling is there."""
+    found = set(re.findall(r"python -m ([\w.]+)", DOCUMENTATION + README))
+    # Only our own modules: the docs also run stdlib and installed tools
+    # (venv, uvicorn, streamlit, pytest), which are not this repository's to pin.
+    ours = {
+        item.name for item in ROOT.iterdir()
+        if item.is_dir() and (item / "__init__.py").exists()
+    }
+    documented = {d for d in found if d.split(".")[0] in ours}
+
+    assert documented, "no commands of ours found in the docs, so this proves nothing"
+    for dotted in documented:
+        path = ROOT / Path(*dotted.split("."))
+        assert path.with_suffix(".py").exists() or (path / "__main__.py").exists(), (
+            f"the docs tell the reader to run `python -m {dotted}`, which does not exist"
+        )
+
+
+def test_the_linter_covers_every_package_of_ours():
+    """A package CI does not lint is a package where style and unused imports
+    rot quietly - scripts/ was added and missed exactly that way."""
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    linted = set(re.search(r"ruff check ([\w /]+)", workflow).group(1).split())
+
+    ours = {
+        item.name for item in ROOT.iterdir()
+        if item.is_dir() and (item / "__init__.py").exists()
+    } | {"frontend"}
+
+    assert not ours - linted, f"not linted in CI: {sorted(ours - linted)}"

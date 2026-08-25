@@ -15,6 +15,7 @@ services:
       - .:/app
       - data_uploads:/app/data/uploads
       - data_chroma:/app/data/chroma_db
+      - data_feedback:/app/data/feedback
 
   frontend:
     volumes:
