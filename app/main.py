@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 import os
 import re
@@ -20,6 +21,7 @@ from fastapi import (
 from fastapi import (
     Path as PathParam,
 )
+from fastapi.responses import StreamingResponse
 from fastapi.security import APIKeyHeader
 from openai import APITimeoutError, RateLimitError
 
@@ -432,6 +434,71 @@ def clear_documents(request: Request, user_id: str = USER_ID_QUERY):
             logger.warning("Could not fully remove upload dir for %s", user_id)
 
     return ClearResponse(message="Documents cleared successfully")
+
+
+def _sse(event: dict) -> str:
+    """One Server-Sent Event. ensure_ascii=False keeps the payload small."""
+    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+# `def`, not `async def` - see the note on upload_document.
+@router.post("/query/stream")
+def query_rag_stream(request: Request, payload: QueryRequest):
+    """Answer as the tokens arrive, instead of after the last one.
+
+    /query is unchanged; this is an addition. Five to fifteen seconds of a
+    motionless spinner was the most visible latency in the product.
+
+    The generator is primed here on purpose. Retrieval, and the condensing call
+    a follow-up needs, both happen on that first step - so their failures are
+    still ordinary status codes, rather than something a client has to dig out
+    of a stream whose headers already said 200.
+    """
+    stream = request.app.state.rag_chain.ask_stream(
+        question=payload.question,
+        language=payload.language,
+        user_id=payload.user_id,
+        history=payload.history,
+    )
+
+    try:
+        first_event = next(stream)
+    except RateLimitError as exc:
+        logger.warning("OpenAI rate limited the request: %s", exc)
+        raise HTTPException(
+            status_code=429,
+            detail="Upstream model is rate limited. Please retry shortly.",
+            headers={"Retry-After": "20"},
+        )
+    except APITimeoutError:
+        logger.warning("OpenAI timed out after %ss", _openai_timeout(request))
+        raise HTTPException(
+            status_code=504, detail="The model did not answer in time. Please retry."
+        )
+    except Exception:
+        logger.exception("Query failed")
+        raise HTTPException(status_code=503, detail="Query failed")
+
+    def events():
+        yield _sse(first_event)
+        try:
+            for event in stream:
+                yield _sse(event)
+        except Exception:
+            # The status line is long gone by now, so the only honest way to
+            # report this is in the stream itself.
+            logger.exception("Streaming failed after the response started")
+            yield _sse({"type": "error", "detail": "The answer was cut short."})
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            # Tells nginx not to buffer, which would defeat the point.
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # =========================

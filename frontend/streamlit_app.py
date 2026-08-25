@@ -1,4 +1,5 @@
 import hashlib
+import json
 import sys
 import uuid
 from pathlib import Path
@@ -389,22 +390,28 @@ if question and question.strip():
     with st.chat_message("user"):
         st.markdown(question)
 
-    with st.chat_message("assistant"), st.spinner("Thinking..."):
+    payload = {
+        "question": question,
+        "language": language,
+        "user_id": USER_ID,
+        # Only what the backend will actually use; sending more would just be
+        # prompt tokens the API discards.
+        "history": [
+            {"question": t["question"], "answer": t["answer"]}
+            for t in transcript[-HISTORY_TURNS_SENT:]
+        ],
+    }
+
+    with st.chat_message("assistant"):
+        # The response is opened before streaming so an ordinary failure is
+        # still an ordinary error message; only what arrives after a 200 has
+        # to be reported inside the stream.
         try:
             response = requests.post(
-                f"{API_URL}/query",
-                json={
-                    "question": question,
-                    "language": language,
-                    "user_id": USER_ID,
-                    # Only what the backend will actually use; sending more
-                    # would just be prompt tokens the API discards.
-                    "history": [
-                        {"question": t["question"], "answer": t["answer"]}
-                        for t in transcript[-HISTORY_TURNS_SENT:]
-                    ],
-                },
+                f"{API_URL}/query/stream",
+                json=payload,
                 headers=HEADERS,
+                stream=True,
                 timeout=120,
             )
         except requests.RequestException as e:
@@ -415,18 +422,39 @@ if question and question.strip():
             st.error(backend_error(response))
             st.stop()
 
-        data = response.json()
-        st.markdown(data["answer"])
-        if data.get("sources"):
-            with st.expander(f"📚 {len(data['sources'])} source(s)"):
-                for src in data["sources"]:
+        # Sources arrive before the first token, but the expander is rendered
+        # under the answer, so they are collected as the stream runs.
+        collected = {"sources": [], "error": None}
+
+        def tokens():
+            with response:
+                for line in response.iter_lines(decode_unicode=True):
+                    if not line or not line.startswith("data: "):
+                        continue
+                    event = json.loads(line[len("data: "):])
+                    kind = event.get("type")
+                    if kind == "token":
+                        yield event["text"]
+                    elif kind == "sources":
+                        collected["sources"] = event.get("sources", [])
+                    elif kind == "error":
+                        collected["error"] = event.get("detail", "The answer was cut short.")
+
+        answer = st.write_stream(tokens())
+
+        if collected["error"]:
+            st.warning(collected["error"])
+
+        if collected["sources"]:
+            with st.expander(f"📚 {len(collected['sources'])} source(s)"):
+                for src in collected["sources"]:
                     st.markdown(f"**{src['source']}**")
                     st.caption(src["preview"])
 
     transcript.append(
         {
             "question": question,
-            "answer": data["answer"],
-            "sources": data.get("sources", []),
+            "answer": answer,
+            "sources": collected["sources"],
         }
     )

@@ -15,6 +15,8 @@ ChromaDB vector store, OpenAI embeddings and chat.
 - **Source Attribution**: Every answer is accompanied by a separate list of source
   filenames with 200-character previews. Inline citation markers (`[1]`, `[2]`) are
   deliberately stripped from the answer text.
+- **Streamed Answers**: The web UI shows the answer as it is written, rather
+  than after the whole thing is generated.
 - **Conversations**: Follow-up questions work - the assistant rewrites them
   into standalone questions before searching, so "and the second one?" finds
   the right passage. The Streamlit UI keeps the transcript on screen.
