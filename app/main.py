@@ -7,12 +7,31 @@ import shutil
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import APIRouter, Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
+from fastapi import (
+    Path as PathParam,
+)
 from fastapi.security import APIKeyHeader
 from openai import APITimeoutError, RateLimitError
 
 from app.config import Settings, get_settings
-from app.models.schemas import QueryRequest, QueryResponse
+from app.models.schemas import (
+    ClearResponse,
+    DeleteResponse,
+    DocumentListResponse,
+    QueryRequest,
+    QueryResponse,
+    UploadResponse,
+)
 from app.rag.chain import RAGChain
 from app.rag.document_loader import DocumentLoader
 from app.rag.embeddings import EmbeddingsManager
@@ -26,6 +45,10 @@ API_VERSION = "0.2.0"
 # so it is restricted to filesystem- and filter-safe characters.
 USER_ID_PATTERN = r"^[A-Za-z0-9_-]+$"
 USER_ID_QUERY = Query(..., min_length=1, max_length=64, pattern=USER_ID_PATTERN)
+
+# The content hash is the public handle for a document: 16 hex characters, cut
+# from a sha256 in upload_document.
+FILE_HASH_PATH = PathParam(..., min_length=16, max_length=16, pattern=r"^[0-9a-f]{16}$")
 
 # Copying .env.template verbatim leaves a "valid" key that anyone can read off
 # the repository, which is worse than no key at all because it looks secure.
@@ -183,7 +206,7 @@ def __getattr__(name):
 # request in the process, /health included, and the compose healthcheck then
 # restarted a backend that was merely busy. FastAPI runs a plain `def` handler
 # in a threadpool instead.
-@router.post("/upload")
+@router.post("/upload", response_model=UploadResponse)
 def upload_document(
     request: Request,
     file: UploadFile = File(...),
@@ -240,12 +263,13 @@ def upload_document(
         raise HTTPException(status_code=503, detail="Vector store unavailable")
 
     if already_indexed:
-        return {
-            "message": "Document already indexed (identical content)",
-            "filename": safe_name,
-            "chunks": 0,
-            "duplicate": True
-        }
+        return UploadResponse(
+            message="Document already indexed (identical content)",
+            filename=safe_name,
+            chunks=0,
+            duplicate=True,
+            file_hash=file_hash,
+        )
 
     # 💾 Save file under the user's own directory, keyed by content hash.
     # user_id is validated ([A-Za-z0-9_-]{1,64}), so it is path-safe as-is.
@@ -299,12 +323,57 @@ def upload_document(
         file_path.unlink(missing_ok=True)
         raise HTTPException(status_code=503, detail="Vector store unavailable")
 
-    return {
-        "message": "Document processed successfully",
-        "filename": safe_name,
-        "chunks": len(chunks),
-        "duplicate": False
-    }
+    # ♻️ Same filename, different content: this is a new revision, so retire
+    # the old one. Keeping both meant two versions of "report.pdf" answering
+    # the same question with no way for the reader to tell which sentence came
+    # from which revision. Done after the new one is safely indexed, so a
+    # failure above never leaves the owner with neither.
+    replaced = _retire_older_revisions(state, settings, safe_name, file_hash, user_id)
+
+    return UploadResponse(
+        message="Document processed successfully",
+        filename=safe_name,
+        chunks=len(chunks),
+        duplicate=False,
+        file_hash=file_hash,
+        replaced=replaced,
+    )
+
+
+def _retire_older_revisions(state, settings, source: str, keep_hash: str, user_id: str) -> bool:
+    """Drop other revisions stored under the same filename for this owner."""
+    try:
+        stale = [
+            h for h in state.embeddings.file_hashes_for_source(source, user_id)
+            if h != keep_hash
+        ]
+    except Exception:
+        logger.exception("Could not look up earlier revisions of %s", source)
+        return False
+
+    removed = False
+    for old_hash in stale:
+        try:
+            state.embeddings.delete_by_file_hash(old_hash, user_id)
+            _remove_stored_file(settings, user_id, old_hash)
+            removed = True
+            logger.info(
+                "Replaced revision %s of %s for user_id=%s", old_hash, source, user_id
+            )
+        except Exception:
+            # The new revision is already live; a stale leftover is worth a log,
+            # not a failed upload.
+            logger.exception("Could not retire revision %s of %s", old_hash, source)
+    return removed
+
+
+def _remove_stored_file(settings: Settings, user_id: str, file_hash: str) -> None:
+    """Delete the raw upload whose name starts with this content hash."""
+    owner_dir = settings.upload_dir / user_id
+    if not owner_dir.is_dir():
+        return
+    for path in owner_dir.glob(f"{file_hash}_*"):
+        path.unlink(missing_ok=True)
 
 
 # `def`, not `async def` - see the note on upload_document. The chain's OpenAI
@@ -338,7 +407,7 @@ def query_rag(request: Request, payload: QueryRequest):
 
 # `def`, not `async def`: deleting from ChromaDB and rmtree-ing the upload
 # directory are both blocking calls.
-@router.post("/clear")
+@router.post("/clear", response_model=ClearResponse)
 def clear_documents(request: Request, user_id: str = USER_ID_QUERY):
     state = request.app.state
     settings: Settings = state.settings
@@ -359,4 +428,60 @@ def clear_documents(request: Request, user_id: str = USER_ID_QUERY):
         if owner_dir.exists():
             logger.warning("Could not fully remove upload dir for %s", user_id)
 
-    return {"message": "Documents cleared successfully"}
+    return ClearResponse(message="Documents cleared successfully")
+
+
+# =========================
+# Document inventory
+# =========================
+@router.get("/documents", response_model=DocumentListResponse)
+def list_documents(request: Request, user_id: str = USER_ID_QUERY):
+    """What this owner has indexed.
+
+    There was no way to find this out before: the Streamlit sidebar only knew
+    about uploads made in the current browser session, and the bot knew
+    nothing at all, so the only way to fix one stale file was to clear
+    everything and re-upload.
+    """
+    try:
+        documents = request.app.state.embeddings.list_documents(user_id)
+    except Exception:
+        logger.exception("Could not list documents")
+        raise HTTPException(status_code=503, detail="Vector store unavailable")
+
+    return DocumentListResponse(
+        documents=documents,
+        total_chunks=sum(doc["chunks"] for doc in documents),
+    )
+
+
+@router.delete("/documents/{file_hash}", response_model=DeleteResponse)
+def delete_document(
+    request: Request,
+    file_hash: str = FILE_HASH_PATH,
+    user_id: str = USER_ID_QUERY,
+):
+    """Remove one document: its chunks and the raw file behind it.
+
+    Owner-scoped, so the same content held by another tenant is untouched -
+    the hash is identical across owners by construction.
+    """
+    state = request.app.state
+    settings: Settings = state.settings
+
+    try:
+        removed = state.embeddings.delete_by_file_hash(file_hash, user_id)
+    except Exception:
+        logger.exception("Could not delete document %s", file_hash)
+        raise HTTPException(status_code=503, detail="Vector store unavailable")
+
+    if not removed:
+        raise HTTPException(status_code=404, detail="No such document")
+
+    _remove_stored_file(settings, user_id, file_hash)
+
+    return DeleteResponse(
+        message="Document deleted",
+        file_hash=file_hash,
+        chunks_removed=removed,
+    )

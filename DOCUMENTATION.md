@@ -66,7 +66,8 @@ graph TD
         versions sort its imports differently.
 
 3.  **Backend (`app/`)**:
-    -   **API (`main.py`)**: exposes `/upload`, `/query`, `/clear`, and `/health`.
+    -   **API (`main.py`)**: exposes `/upload`, `/query`, `/documents` (list and
+        delete), `/clear`, and `/health`.
         `create_app()` is an application factory; components are built once during
         `lifespan` startup and stored on `app.state`.
     -   **Configuration (`config.py`)**: a single pydantic-settings `Settings` class is the
@@ -230,7 +231,8 @@ Open `http://localhost:8501`. Upload in the sidebar, ask in the main pane.
 1. Send `/start` and pick an answer language.
 2. Attach a document (PDF/TXT).
 3. Send any plain text message to ask a question.
-4. `/clear` removes your documents; `/help` shows usage.
+4. `/documents` lists what is indexed; `/clear` removes all of it;
+   `/help` shows usage.
 
 ## API Reference
 
@@ -254,14 +256,21 @@ Uploads and indexes a document.
 -   **Response (indexed)**:
     ```json
     {"message": "Document processed successfully", "filename": "report.pdf",
-     "chunks": 15, "duplicate": false}
+     "chunks": 15, "duplicate": false, "file_hash": "a1b2c3d4e5f60718",
+     "replaced": false}
     ```
+    `file_hash` is the handle the document endpoints below take.
 -   **Response (duplicate)** - the same bytes were already indexed for this `user_id`
     (deduplicated by SHA-256 of the file content):
     ```json
     {"message": "Document already indexed (identical content)", "filename": "report.pdf",
-     "chunks": 0, "duplicate": true}
+     "chunks": 0, "duplicate": true, "file_hash": "a1b2c3d4e5f60718",
+     "replaced": false}
     ```
+-   **Revisions**: uploading a **different** file under a name this `user_id` already
+    used replaces the earlier revision - its chunks and its stored file are removed and
+    `replaced` comes back `true`. Both revisions used to stay indexed and answer the
+    same question, with nothing telling the reader which sentence came from which.
 -   **Errors**:
     -   `400` - unsupported extension, empty file, no extractable text, a corrupt or
         unparseable document, or a file larger than `MAX_FILE_SIZE`.
@@ -283,7 +292,39 @@ Asks a question against the indexed documents.
     Sources are deduplicated by filename and numbered from 1. When nothing is retrieved
     the call still succeeds with `"No relevant information found."` and an empty
     `sources` list - the language model is not invoked.
--   **Errors**: `401`, `422` (validation), `503` (retrieval or generation failed).
+-   **Errors**:
+    -   `401` - bad or missing `X-API-Key`.
+    -   `422` - validation (question length, `user_id` shape).
+    -   `429` - the model provider rate limited us. Retryable; a `Retry-After`
+        header says how long to wait.
+    -   `504` - the model did not answer within `OPENAI_TIMEOUT`. Retryable.
+    -   `503` - retrieval or generation failed for another reason.
+
+### `GET /documents`
+Lists what this `user_id` has indexed, one entry per document rather than per chunk.
+-   **Query Parameters**: `user_id` (**required**).
+-   **Response**:
+    ```json
+    {"documents": [{"file_hash": "a1b2c3d4e5f60718", "source": "report.pdf",
+                    "chunks": 15, "type": "pdf", "pages": 4}],
+     "total_chunks": 15}
+    ```
+    Sorted by filename, case-insensitively. `pages` is `null` for text files.
+-   **Errors**: `401`, `422`, `503` (vector store unavailable).
+
+### `DELETE /documents/{file_hash}`
+Removes one document: its chunks **and** the raw file behind it.
+-   **Path Parameters**: `file_hash` - 16 lowercase hex characters, as returned by
+    `/upload` and `GET /documents`.
+-   **Query Parameters**: `user_id` (**required**).
+-   **Response**:
+    ```json
+    {"message": "Document deleted", "file_hash": "a1b2c3d4e5f60718", "chunks_removed": 15}
+    ```
+-   Scoped to the owner: the identical file held by another `user_id` is untouched,
+    and deleting a hash you do not own is a `404`, not a silent success.
+-   **Errors**: `401`, `404` (no such document for this owner), `422` (malformed hash
+    or `user_id`), `503`.
 
 ### `POST /clear`
 Deletes the caller's documents: both the vectors **and** the raw uploaded files on disk.

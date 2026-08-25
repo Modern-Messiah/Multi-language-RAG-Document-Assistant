@@ -16,6 +16,9 @@ ChromaDB vector store, OpenAI embeddings and chat.
   filenames with 200-character previews. Inline citation markers (`[1]`, `[2]`) are
   deliberately stripped from the answer text.
 - **Content Deduplication**: Re-uploading the same bytes is a no-op, per owner.
+- **Document Management**: List what is indexed and delete one document at a
+  time. Re-uploading a file under the same name replaces the earlier revision
+  rather than letting both answer questions.
 - **Multiple Interfaces**:
   - **FastAPI Backend**: REST API guarded by a shared-secret header.
   - **Streamlit Web UI**: Responsive desktop/mobile interface.
@@ -71,7 +74,8 @@ ChromaDB vector store, OpenAI embeddings and chat.
    - Send `/start` and pick an answer language.
    - Attach a PDF or TXT file to index it.
    - Send any plain text message to ask a question about your documents.
-   - `/clear` deletes your documents, `/help` shows usage.
+   - `/documents` lists what is indexed, `/clear` deletes all of it,
+     `/help` shows usage.
 
 ## Run without Docker
 
