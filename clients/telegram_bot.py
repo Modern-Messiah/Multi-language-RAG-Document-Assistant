@@ -116,6 +116,27 @@ def split_for_telegram(text: str, budget: int = _CHUNK_BUDGET) -> list:
     return chunks
 
 
+def format_document_list(documents: list) -> str:
+    """Render the inventory as one HTML message.
+
+    Pure on purpose: the bot had no way to show what it had indexed, and this
+    formatting is the part worth testing without a Telegram server in the loop.
+    """
+    if not documents:
+        return "You have no documents indexed. Send me a PDF or TXT file."
+
+    lines = [f"<b>Your documents ({len(documents)}):</b>"]
+    for doc in documents:
+        name = html.escape(str(doc.get("source", "unknown")))
+        chunks = doc.get("chunks", 0)
+        detail = f"{chunks} chunk{'s' if chunks != 1 else ''}"
+        if doc.get("pages"):
+            pages = doc["pages"]
+            detail += f", {pages} page{'s' if pages != 1 else ''}"
+        lines.append(f"\n• <b>{name}</b>\n  <i>{detail}</i>")
+    return "".join(lines)
+
+
 def backend_error(response) -> str:
     """Describe a failed backend response, logging operator-only failures.
 
@@ -157,8 +178,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1. Attach a PDF or TXT file and I will index it.\n"
         "2. Send any text message to ask questions about your documents.\n"
         "3. Select a language from the keyboard to set the response language.\n"
-        "4. Use /clear to delete your uploaded documents.\n"
-        "5. Use /start to reset conversation."
+        "4. Use /documents to see what I have indexed.\n"
+        "5. Use /clear to delete all of them.\n"
+        "6. Use /start to reset conversation."
     )
     await update.message.reply_text(help_text)
 
@@ -181,6 +203,31 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error in clear command: {e}")
         await update.message.reply_text("❌ An error occurred.")
+
+async def documents_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List what this user has indexed.
+
+    There was no way to ask before: the bot knew nothing about its own corpus,
+    so the only way to deal with a stale file was /clear and start over.
+    """
+    user_id = str(update.effective_user.id)
+    try:
+        async with httpx.AsyncClient(timeout=CLEAR_TIMEOUT) as client:
+            response = await client.get(
+                f"{BACKEND_URL}/documents",
+                params={"user_id": user_id},
+                headers=BACKEND_HEADERS,
+            )
+            if response.status_code == 200:
+                await update.message.reply_html(
+                    format_document_list(response.json()["documents"])
+                )
+            else:
+                await update.message.reply_text(f"❌ {backend_error(response)}")
+    except Exception as e:
+        logger.error(f"Error listing documents: {e}")
+        await update.message.reply_text("❌ An error occurred.")
+
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle uploaded documents."""
@@ -346,6 +393,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("clear", clear_command))
+    app.add_handler(CommandHandler("documents", documents_command))
 
     # Handle documents
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))

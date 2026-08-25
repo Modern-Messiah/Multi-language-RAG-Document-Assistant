@@ -239,6 +239,63 @@ with st.sidebar:
 
     st.divider()
 
+    # =========================
+    # What the backend actually holds
+    # =========================
+    # Asked every rerun rather than tracked in session_state: the widget only
+    # ever knew about uploads made in this browser session, so after a refresh
+    # the sidebar confidently showed nothing while the documents were still
+    # indexed and still answering questions.
+    st.header("📚 Your documents")
+
+    indexed_documents = []
+    try:
+        listing = requests.get(
+            f"{API_URL}/documents",
+            params={"user_id": USER_ID},
+            headers=HEADERS,
+            timeout=30,
+        )
+    except requests.RequestException as e:
+        st.warning(f"Could not reach the backend: {e}")
+    else:
+        if listing.status_code == 200:
+            indexed_documents = listing.json()["documents"]
+        else:
+            st.warning(backend_error(listing))
+
+    if not indexed_documents:
+        st.caption("Nothing indexed yet.")
+    else:
+        for doc in indexed_documents:
+            detail = f"{doc['chunks']} chunk{'s' if doc['chunks'] != 1 else ''}"
+            if doc.get("pages"):
+                detail += f", {doc['pages']} page{'s' if doc['pages'] != 1 else ''}"
+
+            row, action = st.columns([5, 1])
+            row.markdown(f"**{doc['source']}**  \n{detail}")
+            if action.button("🗑", key=f"del_{doc['file_hash']}", help="Delete this document"):
+                try:
+                    removal = requests.delete(
+                        f"{API_URL}/documents/{doc['file_hash']}",
+                        params={"user_id": USER_ID},
+                        headers=HEADERS,
+                        timeout=30,
+                    )
+                except requests.RequestException as e:
+                    st.error(f"Backend unreachable: {e}")
+                else:
+                    if removal.status_code == 200:
+                        # The uploader still holds the file; without clearing
+                        # that record the next rerun would re-upload it.
+                        st.session_state.pop("indexed_files", None)
+                        st.session_state["uploader_key"] += 1
+                        st.rerun()
+                    else:
+                        st.error(backend_error(removal))
+
+    st.divider()
+
     st.header("⚙️ Settings")
 
     # Labels decorate the values; the values themselves come from the backend's
@@ -297,13 +354,14 @@ with st.sidebar:
 # =========================
 # Main - Status
 # =========================
-# Count what the backend actually accepted, not what the widget is holding:
-# the old count included files that failed to index, and dropped to zero as
-# soon as a file was removed from the uploader even though it stayed indexed.
-if indexed_files:
-    st.success(f"📚 {len(indexed_files)} document(s) indexed")
+# Straight from the backend, which is the only thing that knows. Session
+# state described this browser tab's uploads, so a refresh reported zero while
+# the documents were still there, and a failed upload was counted as indexed.
+if indexed_documents:
+    count = len(indexed_documents)
+    st.success(f"📚 {count} document{'s' if count != 1 else ''} indexed")
 else:
-    st.warning("No documents uploaded yet")
+    st.warning("No documents indexed yet")
 
 # =========================
 # Question input
@@ -321,10 +379,9 @@ ask_btn = st.button("🔍 Ask", type="primary")
 # Ask logic
 # =========================
 if ask_btn:
-    # Gate on what is indexed, not on the uploader widget: removing a file
-    # from the widget used to block questions about documents that are still
-    # indexed on the backend.
-    if not indexed_files:
+    # Gate on what the backend holds. Gating on the uploader widget blocked
+    # questions about documents that were indexed and perfectly answerable.
+    if not indexed_documents:
         st.warning("Please upload at least one document first")
         st.stop()
 

@@ -311,13 +311,98 @@ class EmbeddingsManager:
         if self.collection is None:
             return False
 
-        where = {"$and": [
-            {"file_hash": {"$eq": file_hash}},
-            {"user_id": {"$eq": owner}}
-        ]}
-
-        results = self.collection.get(where=where, limit=1)
+        results = self.collection.get(
+            where=self._owned(owner, file_hash=file_hash), limit=1
+        )
         return bool(results.get("ids"))
+
+    def file_hashes_for_source(self, source: str, owner: str) -> List[str]:
+        """Content hashes this owner has stored under a given filename.
+
+        More than one means the same name was uploaded twice with different
+        content - two revisions of "report.pdf" both answering questions, with
+        no way for the reader to tell which sentence came from which.
+        """
+        if self.collection is None:
+            return []
+
+        results = self.collection.get(
+            where=self._owned(owner, source=source), include=["metadatas"]
+        )
+        hashes = []
+        for metadata in results.get("metadatas") or []:
+            file_hash = metadata.get("file_hash")
+            if file_hash and file_hash not in hashes:
+                hashes.append(file_hash)
+        return hashes
+
+    @staticmethod
+    def _owned(owner: str, **equals) -> dict:
+        """A Chroma `where` clause that is always scoped to one owner.
+
+        Every lookup and delete goes through this, so a query can never be
+        written that forgets the tenant filter.
+        """
+        clauses = [{"user_id": {"$eq": owner}}]
+        clauses += [{key: {"$eq": value}} for key, value in equals.items()]
+        return clauses[0] if len(clauses) == 1 else {"$and": clauses}
+
+    def list_documents(self, owner: str) -> List[dict]:
+        """Everything this owner has indexed, one entry per document.
+
+        Chunks are the storage unit but not the unit a person thinks in, so
+        they are folded back into documents by content hash. Only metadata is
+        fetched - pulling embeddings back for a listing would be pointless
+        traffic.
+        """
+        if self.collection is None:
+            return []
+
+        results = self.collection.get(
+            where=self._owned(owner), include=["metadatas"]
+        )
+
+        documents = {}
+        for metadata in results.get("metadatas") or []:
+            file_hash = metadata.get("file_hash")
+            if not file_hash:
+                continue  # predates content hashing; nothing to address it by
+
+            entry = documents.setdefault(
+                file_hash,
+                {
+                    "file_hash": file_hash,
+                    "source": metadata.get("source", "unknown"),
+                    "type": metadata.get("type"),
+                    "pages": metadata.get("total_pages"),
+                    "chunks": 0,
+                },
+            )
+            entry["chunks"] += 1
+
+        return sorted(documents.values(), key=lambda d: d["source"].lower())
+
+    def delete_by_file_hash(self, file_hash: str, owner: str) -> int:
+        """Delete one document's chunks. Returns how many were removed.
+
+        Owner-scoped like every other lookup: without the tenant clause this
+        would delete another user's copy of the same file, since the content
+        hash is identical across owners by construction.
+        """
+        if self.collection is None:
+            return 0
+
+        where = self._owned(owner, file_hash=file_hash)
+        existing = self.collection.get(where=where, include=[])
+        count = len(existing.get("ids") or [])
+        if not count:
+            return 0
+
+        self.collection.delete(where=where)
+        logger.info(
+            "Deleted %d chunk(s) for file_hash=%s owner=%s", count, file_hash, owner
+        )
+        return count
 
     def delete_documents(self, filter: dict):
         """

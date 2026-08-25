@@ -128,20 +128,31 @@ def test_docs_state_the_real_chunking_defaults():
     assert "500" not in described and "50 char" not in described
 
 
-def test_docs_do_not_advertise_nonexistent_bot_commands():
-    """The bot registers /start, /help and /clear only.
+BOT_COMMANDS = {"start", "help", "clear", "documents"}
 
-    Read from the module rather than its source: since the bot became an
-    importable package this can assert on what is actually registered.
-    """
+
+def _registered_bot_commands():
     bot_source = (ROOT / "clients" / "telegram_bot.py").read_text(encoding="utf-8")
-    registered = set(re.findall(r'CommandHandler\("(\w+)"', bot_source))
+    return set(re.findall(r'CommandHandler\("(\w+)"', bot_source))
 
+
+def test_docs_do_not_advertise_nonexistent_bot_commands():
     for advertised in re.findall(r"`?/(\w+)`?", README):
         if advertised in {"upload", "query"}:
             pytest.fail(f"README advertises /{advertised}, which the bot does not handle")
 
-    assert registered == {"start", "help", "clear"}
+    assert _registered_bot_commands() == BOT_COMMANDS
+
+
+def test_every_bot_command_is_documented():
+    """A command nobody knows about may as well not exist."""
+    for command in _registered_bot_commands():
+        assert f"/{command}" in README, f"/{command} is not in README.md"
+
+    help_text = (ROOT / "clients" / "telegram_bot.py").read_text(encoding="utf-8")
+    help_block = help_text.split("help_text = (")[1].split(")")[0]
+    for command in _registered_bot_commands() - {"help"}:
+        assert f"/{command}" in help_block, f"/{command} is missing from /help"
 
 
 def test_docs_reference_the_current_bot_entry_point():
