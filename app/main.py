@@ -21,7 +21,7 @@ from fastapi import (
 from fastapi import (
     Path as PathParam,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from openai import APITimeoutError, RateLimitError
 
@@ -33,6 +33,13 @@ from app.models.schemas import (
     QueryRequest,
     QueryResponse,
     UploadResponse,
+)
+from app.observability import (
+    REQUEST_ID_HEADER,
+    RequestContextMiddleware,
+    configure_logging,
+    readiness,
+    request_id_of,
 )
 from app.rag.chain import RAGChain
 from app.rag.document_loader import SUPPORTED_EXTENSIONS, DocumentLoader
@@ -127,10 +134,7 @@ router = APIRouter(dependencies=[Depends(require_api_key)])
 async def lifespan(app: FastAPI):
     settings: Settings = app.state.settings
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
+    configure_logging()
 
     if not settings.backend_api_key:
         logger.warning(
@@ -187,10 +191,44 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     )
     application.state.settings = settings or get_settings()
     application.include_router(router)
+    application.add_middleware(RequestContextMiddleware)
 
     @application.get("/health")
     async def health():
+        """Liveness only: the process is answering. Says nothing about whether
+        it can serve a query - that is what /ready is for."""
         return {"status": "ok", "version": application.version}
+
+    # Deliberately `def`: the readiness check reads from ChromaDB, which blocks.
+    # As a coroutine it would run on the event loop and a slow disk would stall
+    # every other request while answering a probe.
+    @application.get("/ready")
+    def ready():
+        """Whether the components a request needs are usable.
+
+        Unauthenticated, like /health: an orchestrator's probe has no API key.
+        It therefore reports check names and pass/fail, never why.
+        """
+        ok, checks = readiness(application.state)
+        body = {"status": "ready" if ok else "not ready", "checks": checks}
+        return JSONResponse(body, status_code=200 if ok else 503)
+
+    @application.exception_handler(Exception)
+    async def unhandled_error(request: Request, exc: Exception):
+        """Answer a crash in JSON, naming the request.
+
+        Without this, an unhandled exception produced a plain-text 500 from the
+        server itself, outside this app's middleware - so the response carried
+        no request id, and the one failure a user most needs to report was the
+        one they could not point at. The exception still propagates for the
+        server to log and for tests to see.
+        """
+        request_id = request_id_of(request)
+        return JSONResponse(
+            {"detail": "Internal server error", "request_id": request_id},
+            status_code=500,
+            headers={REQUEST_ID_HEADER: request_id},
+        )
 
     return application
 

@@ -338,6 +338,17 @@ class EmbeddingsManager:
             return 0
         return self.collection.count()
 
+    def ping(self) -> int:
+        """Read from the store, raising if that is not possible.
+
+        count() answers 0 for a closed collection, which is indistinguishable
+        from an empty one - fine for a caller reporting a total, useless for the
+        readiness probe, which needs "no" rather than a plausible zero.
+        """
+        if self.collection is None:
+            raise RuntimeError("No collection is open")
+        return self.collection.count()
+
     # =========================
     # Documents
     # =========================

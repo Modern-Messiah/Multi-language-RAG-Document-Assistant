@@ -176,3 +176,18 @@ def test_production_compose_command_is_documented():
         assert "-f docker-compose.yml" in text, (
             f"{label} does not show how to run the production configuration"
         )
+
+
+def test_the_compose_probe_is_the_endpoint_the_docs_describe():
+    """The frontend and the bot gate their start on this check, so a path that
+    does not exist means they never start at all - and the reason would be a
+    line in a YAML file nobody reads."""
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    probed = set(re.findall(r"urlopen\('http://localhost:8000(/[a-z]+)'", compose))
+
+    assert probed, "no healthcheck probe found in docker-compose.yml"
+    for path in probed:
+        assert f"### `GET {path}`" in DOCUMENTATION, f"{path} is not in the API reference"
+        assert "**No authentication**" in DOCUMENTATION.split(f"### `GET {path}`")[1][:400], (
+            f"{path} is probed without credentials, so it must be unauthenticated"
+        )

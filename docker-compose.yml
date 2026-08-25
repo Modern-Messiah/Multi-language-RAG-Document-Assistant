@@ -20,7 +20,12 @@ services:
       # behind an authenticating reverse proxy on any untrusted network.
       - "127.0.0.1:8000:8000"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      # /ready, not /health: the two services below wait on this condition, and
+      # /health answers 200 as soon as the process accepts a socket - which is
+      # before the vector store is open. They would start and get 503s from a
+      # backend Compose had already called healthy. Docker does not restart an
+      # unhealthy container, so a failing check reports rather than acts.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 5

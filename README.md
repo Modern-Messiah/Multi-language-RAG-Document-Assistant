@@ -25,6 +25,10 @@ ChromaDB vector store, OpenAI embeddings and chat.
 - **Document Management**: List what is indexed and delete one document at a
   time. Re-uploading a file under the same name replaces the earlier revision
   rather than letting both answer questions.
+- **Traceable Failures**: Every request carries an id, every log line records
+  it, and it comes back in the `X-Request-ID` header - so a user reporting "it
+  broke" hands over one string that finds their lines. `/ready` reports whether
+  the backend can actually serve, which `/health` cannot answer.
 - **Multiple Interfaces**:
   - **FastAPI Backend**: REST API guarded by a shared-secret header.
   - **Streamlit Web UI**: Responsive desktop/mobile interface.

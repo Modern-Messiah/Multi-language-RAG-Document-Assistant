@@ -12,6 +12,7 @@ client, because the two use different libraries: `requests` in Streamlit,
 """
 import os
 
+from app.observability import REQUEST_ID_HEADER
 from app.rag.languages import AUTO_LANGUAGE, SUPPORTED_LANGUAGES
 
 __all__ = [
@@ -20,6 +21,7 @@ __all__ = [
     "DEFAULT_BACKEND_URL",
     "DEFAULT_MAX_FILE_SIZE",
     "OPERATOR_ERROR",
+    "REQUEST_ID_HEADER",
     "api_headers",
     "backend_url",
     "describe_error",
@@ -68,12 +70,25 @@ def max_file_mb() -> int:
     return max_file_bytes() // (1024 * 1024)
 
 
-def describe_error(status_code: int, detail=None) -> str:
+def describe_error(status_code: int, detail=None, request_id=None) -> str:
     """Turn a failed backend response into one line fit to show a user.
 
     `detail` is whatever the JSON body's "detail" key held, or None when the
     body was absent or not JSON at all.
+
+    `request_id` is appended only where the user cannot fix the problem
+    themselves - a misconfigured key, a crash, a backend that gave up. Those are
+    the failures they will report to someone, and an id turns "it broke around
+    two" into one grep. On a rejected file or a bad question it would be noise:
+    the message already says what to change.
     """
+    message = _describe(status_code, detail)
+    if request_id and (status_code in _OPERATOR_STATUSES or status_code >= 500):
+        return f"{message} (request {request_id})"
+    return message
+
+
+def _describe(status_code: int, detail=None) -> str:
     if status_code in _OPERATOR_STATUSES:
         return OPERATOR_ERROR
 
@@ -101,10 +116,21 @@ def error_from_response(response) -> str:
     which is exactly what a proxy's HTML 502 page or an empty 500 produces.
     """
     detail = None
+    request_id = None
     try:
         payload = response.json()
     except Exception:
         payload = None
     if isinstance(payload, dict):
         detail = payload.get("detail")
-    return describe_error(response.status_code, detail)
+        # A crash answers with the id in the body as well as the header, which
+        # survives a proxy that strips unknown headers.
+        request_id = payload.get("request_id")
+    # getattr: the doc for this function promises only .status_code and .json(),
+    # and a 502 from a proxy has no header of ours at all.
+    headers = getattr(response, "headers", None) or {}
+    return describe_error(
+        response.status_code,
+        detail,
+        headers.get(REQUEST_ID_HEADER) or request_id,
+    )

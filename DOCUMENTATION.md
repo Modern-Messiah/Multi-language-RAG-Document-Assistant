@@ -245,10 +245,25 @@ the check is skipped entirely - development only, and a warning is logged at sta
 is rejected with `422`. It doubles as a directory name and a metadata filter value, which
 is why it is restricted.
 
+**Every response** carries an `X-Request-ID` header. Send your own to have it
+kept (`[A-Za-z0-9._-]`, up to 64 characters); anything else is replaced. See
+Observability below.
+
 ### `GET /health`
-Liveness probe. **No authentication.**
+Liveness probe: the process is answering. **No authentication.**
 -   **Response**: `{"status": "ok", "version": "0.2.0"}`
--   Used by the Compose healthcheck and by `depends_on: service_healthy`.
+-   Says nothing about whether a query would work - use `/ready` for that.
+
+### `GET /ready`
+Readiness probe: whether the components a request needs are usable.
+**No authentication** - an orchestrator's probe has no API key.
+-   **Response (ready)**: `200` with
+    `{"status": "ready", "checks": {"startup": "ok", "vector_store": "ok"}}`
+-   **Response (not ready)**: `503` with the same shape and `"failed"` against
+    the check that failed. Never *why*: the endpoint is unauthenticated and an
+    exception message can carry a filesystem path.
+-   Used by the Compose healthcheck, so `depends_on: service_healthy` means
+    "can serve" rather than "has a socket open".
 
 ### `POST /upload`
 Uploads and indexes a document.
@@ -361,6 +376,61 @@ Deletes the caller's documents: both the vectors **and** the raw uploaded files 
 -   **Query Parameters**: `user_id` (**required**).
 -   **Response**: `{"message": "Documents cleared successfully"}`
 -   **Errors**: `401`, `422`, `500` (deletion failed).
+
+## Observability
+
+Two questions used to be unanswerable.
+
+**"A user says it failed at 14:32 - which log lines are theirs?"** Every request
+now gets an id. It goes into a context variable, a logging filter puts it on
+every record, and the format string prints it in brackets:
+
+```
+2026-08-25 12:47:52,517 - app.main - ERROR - [bb42c28f0a211d46] Query failed
+2026-08-25 12:47:52,518 - app.observability - INFO - [bb42c28f0a211d46] POST /query -> 503 in 2 ms (user=u1)
+```
+
+`grep bb42c28f0a211d46` returns that request and nothing else, including the
+lines written deep in `app.rag.*` by code that knows nothing about HTTP. Lines
+that belong to no request - startup, background work - print `[-]` rather than
+borrowing an id.
+
+The id comes back in the `X-Request-ID` response header, and in the body of a
+`500`. Both clients show it to the user, but only for failures the user cannot
+fix themselves - a rejected key, a crash, a backend that gave up. On "unsupported
+file format" it would be noise, because the message already says what to change.
+
+A caller may supply the id (a proxy or a client-side trace). It is kept if it
+matches `[A-Za-z0-9._-]{1,64}` and replaced otherwise: the value reaches the log
+and the response, so a newline in it would let a caller forge log lines. The
+same applies to `user_id` in the access line, which is written for rejected
+requests too and so has not been validated at that point.
+
+One access line is written per request, with the status, the duration and the
+owner. `/health` and `/ready` are logged only when they *fail*: the Compose
+healthcheck polls every 15 seconds and would otherwise bury real traffic.
+
+uvicorn writes an access line of its own, through its own handler, and it has no
+request id - so each request appears twice in the log. Ours is the line with the
+id, the duration and the owner; run uvicorn with `--no-access-log` to keep only
+that one.
+
+**"Is the backend ready, or merely running?"** `/health` answers 200 as soon as
+the process accepts a socket, which happens before the vector store is open. An
+orchestrator routing on `/health` sends traffic into 503s. `/ready` checks that
+startup finished and that the store is readable, and Compose's healthcheck uses
+it so `depends_on: service_healthy` means "can serve".
+
+`/ready` deliberately does **not** call OpenAI. Readiness would then depend on a
+third party's availability and quota, and one rate limit would pull every replica
+out of the load balancer while the backend was perfectly able to serve. A failing
+OpenAI call surfaces as a `429` or `504` on the request that needed it, which is
+where it belongs.
+
+The readiness check reads through `EmbeddingsManager.ping()` rather than
+`count()`. `count()` answers 0 for a collection that was never opened, which is
+indistinguishable from an empty one - the first version of the check passed while
+the store was unusable, which is how this was found.
 
 ## Supported formats
 
@@ -611,6 +681,7 @@ subsequent search. To switch models, delete the collection directory
 ├── app/
 │   ├── main.py                 # API entry point, app factory, auth
 │   ├── config.py               # pydantic-settings Settings (single source of truth)
+│   ├── observability.py        # Request ids, access log, readiness checks
 │   ├── models/                 # Pydantic models (QueryRequest, QueryResponse)
 │   ├── rag/                    # RAG core logic
 │   │   ├── languages.py        # The one language table both clients derive from
