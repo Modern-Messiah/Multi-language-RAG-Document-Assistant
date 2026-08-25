@@ -2,6 +2,7 @@
 RAG Chain: Retrieval-Augmented Generation
 """
 
+import logging
 import os
 import re
 from typing import Dict, List, Optional
@@ -15,6 +16,8 @@ from app.rag.languages import AUTO_LANGUAGE, LANG_RULES, rule_for
 # LANG_RULES is re-exported: it lived here first, and the clients now read the
 # same table from app.rag.languages instead of keeping their own copies.
 __all__ = ["LANG_RULES", "RAGChain", "SYSTEM_PROMPT"]
+
+logger = logging.getLogger(__name__)
 
 
 # =========================
@@ -41,6 +44,10 @@ class RAGChain:
         temperature: float = None,
         client: OpenAI = None,
         api_key: Optional[str] = None,
+        max_answer_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
+        max_retries: Optional[int] = None,
+        base_url: str = "",
     ):
         """
         Args:
@@ -59,6 +66,7 @@ class RAGChain:
         self.temperature = float(
             temperature if temperature is not None else os.getenv("TEMPERATURE", 0)
         )
+        self.max_answer_tokens = max_answer_tokens
 
         if client is not None:
             self.client = client
@@ -66,9 +74,52 @@ class RAGChain:
             key = api_key or os.getenv("OPENAI_API_KEY")
             if not key:
                 raise ValueError("OPENAI_API_KEY not found")
+            options = {}
+            if timeout is not None:
+                # The SDK's own default is a 600 s read timeout, far longer
+                # than any of our clients will wait.
+                options["timeout"] = timeout
+            if max_retries is not None:
+                options["max_retries"] = max_retries
+            if base_url:
+                options["base_url"] = base_url
             self.client = OpenAI(
                 api_key=key,
-                http_client=httpx.Client(trust_env=False)
+                http_client=httpx.Client(trust_env=False),
+                **options,
+            )
+
+    # =========================
+    # Cost accounting
+    # =========================
+    def _log_usage(self, response, user_id: str) -> None:
+        """Record what the answer cost, and whether the cap truncated it.
+
+        Nothing measured spend per tenant before: response.usage was read off
+        the wire and thrown away. finish_reason is logged alongside because
+        "length" is how a max_answer_tokens cap that is set too low looks from
+        the outside - a sentence that stops mid-word.
+        """
+        usage = getattr(response, "usage", None)
+        choices = getattr(response, "choices", None) or []
+        finish_reason = getattr(choices[0], "finish_reason", None) if choices else None
+
+        logger.info(
+            "chat completion user_id=%s model=%s prompt_tokens=%s "
+            "completion_tokens=%s total_tokens=%s finish_reason=%s",
+            user_id,
+            self.model,
+            getattr(usage, "prompt_tokens", None),
+            getattr(usage, "completion_tokens", None),
+            getattr(usage, "total_tokens", None),
+            finish_reason,
+        )
+
+        if finish_reason == "length":
+            logger.warning(
+                "Answer for user_id=%s was truncated at MAX_ANSWER_TOKENS=%s",
+                user_id,
+                self.max_answer_tokens,
             )
 
     # =========================
@@ -132,14 +183,19 @@ Question:
 Answer:
 """
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
+        request = {
+            "model": self.model,
+            "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=self.temperature,
-        )
+            "temperature": self.temperature,
+        }
+        if self.max_answer_tokens is not None:
+            request["max_tokens"] = self.max_answer_tokens
+
+        response = self.client.chat.completions.create(**request)
+        self._log_usage(response, user_id)
 
         raw_answer = response.choices[0].message.content.strip()
         answer = self._strip_citations(raw_answer)

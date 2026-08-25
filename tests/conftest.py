@@ -121,11 +121,37 @@ def fake_openai_embeddings(monkeypatch):
     monkeypatch.setattr(OpenAIEmbeddingFunction, "embed_query", fake_embed_query)
 
 
-class FakeChatClient:
-    """Stands in for openai.OpenAI, recording what the chain asked for."""
+# Distinguishes "caller said nothing" from an explicit usage=None, which
+# imitates an endpoint that omits the block.
+_DEFAULT_USAGE = object()
 
-    def __init__(self, answer: str = FAKE_ANSWER):
+
+def _usage(prompt_tokens=120, completion_tokens=40):
+    return SimpleNamespace(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+    )
+
+
+class FakeChatClient:
+    """Stands in for openai.OpenAI, recording what the chain asked for.
+
+    Carries usage and finish_reason because the chain now logs both: usage is
+    the only visibility into spend per tenant, and finish_reason="length" is
+    how a too-low MAX_ANSWER_TOKENS shows up. Pass usage=None to imitate an
+    OpenAI-compatible endpoint that omits the block.
+    """
+
+    def __init__(
+        self,
+        answer: str = FAKE_ANSWER,
+        finish_reason: str = "stop",
+        usage=_DEFAULT_USAGE,
+    ):
         self.answer = answer
+        self.finish_reason = finish_reason
+        self.usage = _usage() if usage is _DEFAULT_USAGE else usage
         self.calls = []
         outer = self
 
@@ -133,7 +159,13 @@ class FakeChatClient:
             def create(self, **kwargs):
                 outer.calls.append(kwargs)
                 return SimpleNamespace(
-                    choices=[SimpleNamespace(message=SimpleNamespace(content=outer.answer))]
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content=outer.answer),
+                            finish_reason=outer.finish_reason,
+                        )
+                    ],
+                    usage=outer.usage,
                 )
 
         self.chat = SimpleNamespace(completions=_Completions())

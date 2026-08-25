@@ -18,10 +18,28 @@ logger = logging.getLogger(__name__)
 
 
 class OpenAIEmbeddingFunction:
-    def __init__(self, model: str, api_key: Optional[str] = None):
+    def __init__(
+        self,
+        model: str,
+        api_key: Optional[str] = None,
+        timeout: Optional[float] = None,
+        max_retries: Optional[int] = None,
+        base_url: str = "",
+    ):
+        options = {}
+        if timeout is not None:
+            # Without this the SDK waits up to 600 s while the caller has long
+            # since given up, holding a worker thread for nothing.
+            options["timeout"] = timeout
+        if max_retries is not None:
+            options["max_retries"] = max_retries
+        if base_url:
+            options["base_url"] = base_url
+
         self.client = OpenAI(
             api_key=api_key,  # None -> read from OPENAI_API_KEY env
-            http_client=httpx.Client(trust_env=False)
+            http_client=httpx.Client(trust_env=False),
+            **options,
         )
         self.model = model
 
@@ -32,6 +50,8 @@ class OpenAIEmbeddingFunction:
     ) -> List[List[float]]:
         all_embeddings: List[List[float]] = []
 
+        billed_tokens = 0
+
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]
 
@@ -40,8 +60,22 @@ class OpenAIEmbeddingFunction:
                 input=batch,
             )
 
+            usage = getattr(response, "usage", None)
+            billed_tokens += getattr(usage, "total_tokens", 0) or 0
+
             all_embeddings.extend(
                 [item.embedding for item in response.data]
+            )
+
+        if billed_tokens:
+            # Indexing is the other half of the bill, and it was invisible:
+            # the usage field came back on every batch and was discarded.
+            logger.info(
+                "embedded %d texts in %d batch(es), model=%s total_tokens=%d",
+                len(texts),
+                (len(texts) + batch_size - 1) // batch_size,
+                self.model,
+                billed_tokens,
             )
 
         return all_embeddings
@@ -69,6 +103,9 @@ class EmbeddingsManager:
         embedding_model: str = "text-embedding-3-small",
         embedding_fn=None,
         api_key: Optional[str] = None,
+        timeout: Optional[float] = None,
+        max_retries: Optional[int] = None,
+        base_url: str = "",
     ):
         """
         Args:
@@ -77,6 +114,9 @@ class EmbeddingsManager:
             embedding_fn: Injectable embeddings object (tests); defaults to
                 OpenAIEmbeddingFunction over the OpenAI API
             api_key: OpenAI API key; defaults to the OPENAI_API_KEY env var
+            timeout / max_retries: passed to the OpenAI client, whose own
+                defaults (600 s read timeout) outlast every caller we have
+            base_url: for Azure or an OpenAI-compatible endpoint
         """
         self.persist_directory = Path(persist_directory)
         self.embedding_model_name = embedding_model
@@ -90,7 +130,11 @@ class EmbeddingsManager:
                     "Please set it in .env file"
                 )
             self.embeddings = OpenAIEmbeddingFunction(
-                model=embedding_model, api_key=api_key
+                model=embedding_model,
+                api_key=api_key,
+                timeout=timeout,
+                max_retries=max_retries,
+                base_url=base_url,
             )
 
         self.client = chromadb.PersistentClient(

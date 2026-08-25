@@ -335,6 +335,10 @@ variable of the same name, read from `.env` or the process environment.
 | `EMBEDDING_MODEL` | OpenAI embedding model. Recorded in the collection; changing it against an existing collection is refused at startup. | `text-embedding-3-small` |
 | `TEMPERATURE` | Sampling temperature, `0.0`–`2.0`. | `0.0` |
 | `TOP_K_RESULTS` | Chunks retrieved per question, `>= 1`. | `5` |
+| `MAX_ANSWER_TOKENS` | Cap on generated answer length, `>= 1`. Without it a completion is unbounded at your expense. | `1000` |
+| `OPENAI_TIMEOUT` | Seconds the OpenAI client waits. Keep it below the clients' own timeouts. | `45.0` |
+| `OPENAI_MAX_RETRIES` | Retries the OpenAI client makes on a transient failure. | `2` |
+| `OPENAI_BASE_URL` | Azure or an OpenAI-compatible endpoint (vLLM, Ollama). Empty means api.openai.com. | `""` |
 | `CHUNK_SIZE` | Characters per chunk, `>= 1`. | `1000` |
 | `CHUNK_OVERLAP` | Overlap between chunks; must be **smaller** than `CHUNK_SIZE`. | `200` |
 | `CHROMA_PERSIST_DIR` | ChromaDB storage directory. | `./data/chroma_db` |
