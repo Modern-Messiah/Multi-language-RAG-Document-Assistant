@@ -90,7 +90,7 @@ def test_upload_traversal_filename_stays_inside_upload_dir(api):
     The previous version passed even with sanitization removed, because it only
     checked one hardcoded escape path.
     """
-    for name in ("../evil.txt", "a/../../evil.txt", "..\..\evil.txt", "/etc/evil.txt"):
+    for name in ("../evil.txt", "a/../../evil.txt", r"..\..\evil.txt", "/etc/evil.txt"):
         response = _upload(api, filename=name, user_id="u1")
         assert response.status_code == 200, f"{name!r}: {response.text}"
 
@@ -234,7 +234,7 @@ def test_upload_store_failure_returns_503(api, monkeypatch):
 
 
 def test_query_failure_returns_503(api, monkeypatch):
-    def boom(question, language="Auto", user_id=None):
+    def boom(*args, **kwargs):
         raise RuntimeError("chroma exploded")
 
     monkeypatch.setattr(api.app_state.rag_chain, "ask", boom)

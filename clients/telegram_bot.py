@@ -49,6 +49,11 @@ QUERY_TIMEOUT = 120.0
 UPLOAD_TIMEOUT = 120.0
 CLEAR_TIMEOUT = 30.0
 
+# Exchanges kept per chat. The backend caps this again with MAX_HISTORY_TURNS;
+# the bound here stops a long-running chat from growing the request body
+# without limit.
+HISTORY_TURNS = 6
+
 # Copying .env.template without editing it leaves these in place, and because
 # they are non-empty the bot used to sail past its own "token missing" check
 # and die inside python-telegram-bot with an opaque InvalidToken.
@@ -163,7 +168,8 @@ def get_language_keyboard():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send a message when the command /start is issued."""
     user = update.effective_user
-    
+    context.user_data.pop("history", None)
+
     await update.message.reply_html(
         rf"Hi {user.mention_html()}! I am your RAG Document Assistant bot. "
         "\n\n<b>Please select your preferred answer language to continue:</b>"
@@ -195,6 +201,9 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 headers=BACKEND_HEADERS
             )
             if response.status_code == 200:
+                # The transcript refers to documents that no longer exist;
+                # keeping it would feed the model a conversation about them.
+                context.user_data.pop("history", None)
                 await update.message.reply_text("✅ All your documents have been cleared!")
             else:
                 await update.message.reply_text(
@@ -310,10 +319,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.chat.send_action(ChatAction.TYPING)
 
         async with httpx.AsyncClient(timeout=QUERY_TIMEOUT) as client:
+            history = context.user_data.get("history", [])
             payload = {
                 "question": text,
                 "language": language,
-                "user_id": str(update.effective_user.id)
+                "user_id": str(update.effective_user.id),
+                "history": history[-HISTORY_TURNS:],
             }
             response = await client.post(
                 f"{BACKEND_URL}/query", json=payload, headers=BACKEND_HEADERS
@@ -344,6 +355,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     # Sent separately so a long answer cannot push the sources
                     # over the limit and lose them.
                     await update.message.reply_html("\n".join(lines))
+
+                # Remember the exchange so the next question can be a follow-up.
+                # Recorded only on success: storing a failed turn would teach
+                # the model that an error message was a valid answer.
+                history.append({"question": text, "answer": answer})
+                context.user_data["history"] = history[-HISTORY_TURNS:]
             else:
                 await update.message.reply_text(f"❌ {backend_error(response)}")
 

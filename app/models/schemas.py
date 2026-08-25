@@ -7,12 +7,24 @@ from pydantic import BaseModel, Field
 USER_ID_FIELD = Field(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
 
 
+class ChatTurn(BaseModel):
+    """One exchange the client wants the assistant to remember."""
+
+    question: str = Field(..., min_length=1, max_length=4000)
+    answer: str = Field(..., min_length=1, max_length=8000)
+
+
 class QueryRequest(BaseModel):
     # Upper bound as well as lower: the question is embedded and then sent to
     # the model, so an unbounded one is a cost and latency amplifier.
     question: str = Field(..., min_length=1, max_length=4000)
     language: str = "Auto"
     user_id: str = USER_ID_FIELD
+    # Conversation history, held by the client rather than the server: the API
+    # stays stateless, and nothing has to expire or be cleaned up. Capped here
+    # against a client that would otherwise grow the prompt without limit;
+    # MAX_HISTORY_TURNS decides how many of these are actually used.
+    history: List[ChatTurn] = Field(default_factory=list, max_length=20)
 
 
 class Source(BaseModel):

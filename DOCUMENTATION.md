@@ -280,8 +280,11 @@ Uploads and indexes a document.
 
 ### `POST /query`
 Asks a question against the indexed documents.
--   **Body**: `{"question": "...", "language": "Auto", "user_id": "..."}`.
-    `question` must be 1–4000 characters; `language` is one of the values in
+-   **Body**: `{"question": "...", "language": "Auto", "user_id": "...",
+    "history": [{"question": "...", "answer": "..."}]}`.
+    `question` must be 1-4000 characters; `history` is optional, holds at most
+    20 turns and is what makes a follow-up work (see
+    [Follow-up questions](#follow-up-questions)); `language` is one of the values in
     [Supported languages](#supported-languages), defaulting to `Auto`. An unrecognised
     value falls back to `Auto` behaviour rather than failing.
 -   **Response**:
@@ -374,9 +377,10 @@ variable of the same name, read from `.env` or the process environment.
 | `BACKEND_API_KEY` | Shared secret for the `X-API-Key` header. Empty disables auth (development only). Must be ASCII. | `""` |
 | `MODEL_NAME` | Chat model used for generation. | `gpt-4o-mini` |
 | `EMBEDDING_MODEL` | OpenAI embedding model. Recorded in the collection; changing it against an existing collection is refused at startup. | `text-embedding-3-small` |
-| `TEMPERATURE` | Sampling temperature, `0.0`–`2.0`. | `0.0` |
+| `TEMPERATURE` | Sampling temperature, `0.0`-`2.0`. | `0.0` |
 | `TOP_K_RESULTS` | Chunks retrieved per question, `>= 1`. | `5` |
 | `RELEVANCE_THRESHOLD` | Cosine similarity a chunk must reach to enter the prompt, `0.0`-`1.0`. `0` keeps every candidate. | `0.0` |
+| `MAX_HISTORY_TURNS` | Past exchanges a follow-up may draw on, `0`-`20`. `0` disables multi-turn. | `6` |
 | `MAX_ANSWER_TOKENS` | Cap on generated answer length, `>= 1`. Without it a completion is unbounded at your expense. | `1000` |
 | `OPENAI_TIMEOUT` | Seconds the OpenAI client waits. Keep it below the clients' own timeouts. | `45.0` |
 | `OPENAI_MAX_RETRIES` | Retries the OpenAI client makes on a transient failure. | `2` |
@@ -393,6 +397,26 @@ variable of the same name, read from `.env` or the process environment.
 Invalid combinations are rejected at startup rather than at first use - for example
 `CHUNK_OVERLAP >= CHUNK_SIZE`, a negative `TOP_K_RESULTS`, or a non-ASCII
 `BACKEND_API_KEY` (HTTP headers cannot carry non-ASCII, so such a key could never match).
+
+### Follow-up questions
+
+"And the second one?" embeds to nothing useful: retrieval matches those literal
+words rather than what the user meant, so a follow-up used to pull back
+unrelated chunks and the answer degraded exactly when the conversation got
+going.
+
+The client sends the recent exchanges in `history`, and when it is non-empty the
+backend makes one extra model call to rewrite the follow-up as a standalone
+question. **Retrieval uses the rewrite; the answer still addresses the question
+as asked**, with the conversation included for context.
+
+The history lives with the client, not the server: the API stays stateless, and
+there are no sessions to expire or clean up. `MAX_HISTORY_TURNS` bounds how many
+exchanges are used (0 disables the feature entirely and restores exactly the old
+single-turn behaviour), and the request schema caps the list at 20 turns
+regardless. A first question makes no extra call, so the common case costs
+nothing new, and if the rewrite fails the original question is used - a
+condensing hiccup degrades the answer rather than breaking the request.
 
 ### Relevance filtering
 

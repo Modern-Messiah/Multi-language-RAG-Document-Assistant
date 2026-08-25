@@ -166,6 +166,7 @@ async def lifespan(app: FastAPI):
         api_key=settings.openai_api_key,
         max_answer_tokens=settings.max_answer_tokens,
         relevance_threshold=settings.relevance_threshold,
+        max_history_turns=settings.max_history_turns,
         timeout=settings.openai_timeout,
         max_retries=settings.openai_max_retries,
         base_url=settings.openai_base_url,
@@ -386,6 +387,7 @@ def query_rag(request: Request, payload: QueryRequest):
             question=payload.question,
             language=payload.language,
             user_id=payload.user_id,
+            history=payload.history,
         )
     except RateLimitError as exc:
         # A quota or rate-limit rejection is retryable and temporary; saying so
