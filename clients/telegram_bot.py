@@ -4,10 +4,17 @@ import os
 
 import httpx
 from dotenv import load_dotenv
-from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.constants import ChatAction, FileSizeLimit, MessageLimit
 from telegram.ext import (
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -17,10 +24,12 @@ from telegram.ext import (
 from app.rag.document_loader import SUPPORTED_EXTENSIONS
 from clients.backend import (
     AUTO_LANGUAGE,
+    REQUEST_ID_HEADER,
     SUPPORTED_LANGUAGES,
     api_headers,
     backend_url,
     error_from_response,
+    feedback_enabled,
 )
 
 # Load environment variables
@@ -57,6 +66,20 @@ HISTORY_TURNS = 6
 
 # One list of formats, shared with the API and the web UI.
 SUPPORTED_LIST = ", ".join(e.lstrip(".").upper() for e in SUPPORTED_EXTENSIONS)
+
+# Rating buttons under each answer, and the same knob the backend reads.
+FEEDBACK_ENABLED = feedback_enabled()
+FEEDBACK_TIMEOUT = 15.0
+
+# Callback data is capped at 64 bytes by Telegram, so it carries the rating and
+# the request id and nothing else. The exchange itself is looked up here.
+FEEDBACK_PREFIX = "fb"
+
+# Answers a chat can still rate. Ratings arrive seconds after the answer in
+# practice; this only bounds what one chat keeps in memory, and a bot restart
+# clears it - a rating for an answer nobody remembers is declined rather than
+# sent with a guessed question.
+RATEABLE_ANSWERS = 20
 
 # Copying .env.template without editing it leaves these in place, and because
 # they are non-empty the bot used to sail past its own "token missing" check
@@ -159,6 +182,78 @@ def backend_error(response) -> str:
             response.status_code,
         )
     return error_from_response(response)
+
+
+def rating_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    """The two buttons under an answer."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("👍", callback_data=f"{FEEDBACK_PREFIX}:up:{request_id}"),
+        InlineKeyboardButton("👎", callback_data=f"{FEEDBACK_PREFIX}:down:{request_id}"),
+    ]])
+
+
+def remember_for_rating(context, request_id: str, exchange: dict) -> None:
+    """Keep the exchange a later button press will refer to.
+
+    Telegram gives a callback 64 bytes of data, nowhere near enough for a
+    question and its sources, so the button carries an id and this holds the
+    rest. Oldest entries fall off so a long-running chat cannot grow without
+    bound.
+    """
+    rateable = context.user_data.setdefault("rateable", {})
+    rateable[request_id] = exchange
+    while len(rateable) > RATEABLE_ANSWERS:
+        rateable.pop(next(iter(rateable)))
+
+
+async def on_rating(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send one rating to the backend and take the buttons away."""
+    query = update.callback_query
+    try:
+        _, rating, request_id = (query.data or "").split(":", 2)
+    except ValueError:
+        await query.answer()
+        return
+
+    exchange = (context.user_data.get("rateable") or {}).get(request_id)
+    if exchange is None:
+        # A restart, or an answer old enough to have fallen off the list. Saying
+        # so is better than sending a rating with an empty question.
+        await query.answer("That answer is too old to rate now.", show_alert=False)
+        await query.edit_message_reply_markup(reply_markup=None)
+        return
+
+    payload = {
+        "rating": rating,
+        "user_id": str(update.effective_user.id),
+        "question": exchange["question"],
+        "answer": exchange["answer"],
+        "sources": exchange["sources"],
+        "request_id": request_id,
+        "language": exchange.get("language", ""),
+        "client": "telegram",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=FEEDBACK_TIMEOUT) as client:
+            response = await client.post(
+                f"{BACKEND_URL}/feedback", json=payload, headers=BACKEND_HEADERS
+            )
+    except Exception as e:
+        logger.error(f"Could not send feedback: {e}")
+        await query.answer("Could not send that, sorry.")
+        return
+
+    if response.status_code != 200:
+        await query.answer("Could not send that, sorry.")
+        logger.warning("Feedback rejected: %s", backend_error(response))
+        return
+
+    await query.answer("Thanks!")
+    # Remove the keyboard rather than leave it live: a second press would record
+    # a second rating of the same answer.
+    await query.edit_message_reply_markup(reply_markup=None)
+    (context.user_data.get("rateable") or {}).pop(request_id, None)
 
 
 def get_language_keyboard():
@@ -347,11 +442,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # with "can't parse entities". Split first, escape after, so
                 # an entity is never cut in half.
                 parts = split_for_telegram(answer)
+                messages = []
                 for index, part in enumerate(parts, start=1):
                     heading = "Answer" if len(parts) == 1 else f"Answer ({index}/{len(parts)})"
-                    await update.message.reply_html(
-                        f"<b>{heading}:</b>\n{html.escape(part)}"
-                    )
+                    messages.append(f"<b>{heading}:</b>\n{html.escape(part)}")
 
                 if sources:
                     lines = ["<b>Sources:</b>"]
@@ -360,7 +454,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         lines.append(f"• <i>{name}</i>")
                     # Sent separately so a long answer cannot push the sources
                     # over the limit and lose them.
-                    await update.message.reply_html("\n".join(lines))
+                    messages.append("\n".join(lines))
+
+                # The id of the request that produced this answer, so a rating
+                # can be tied back to the log lines behind it.
+                request_id = response.headers.get(REQUEST_ID_HEADER)
+                rate_this = FEEDBACK_ENABLED and bool(request_id)
+                if rate_this:
+                    remember_for_rating(context, request_id, {
+                        "question": text,
+                        "answer": answer,
+                        "sources": [str(s.get("source", "")) for s in sources],
+                        "language": language,
+                    })
+
+                last = len(messages) - 1
+                for index, message in enumerate(messages):
+                    # The keyboard goes on the final message so it sits at the
+                    # bottom of the chat, under everything it refers to.
+                    await update.message.reply_html(
+                        message,
+                        reply_markup=rating_keyboard(request_id)
+                        if rate_this and index == last else None,
+                    )
 
                 # Remember the exchange so the next question can be a follow-up.
                 # Recorded only on success: storing a failed turn would teach
@@ -423,6 +539,11 @@ def main():
 
     # Handle text messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Rating buttons under an answer. Registered even when collection is off,
+    # so a button from before the switch was flipped is still answered rather
+    # than spinning forever.
+    app.add_handler(CallbackQueryHandler(on_rating, pattern=f"^{FEEDBACK_PREFIX}:"))
 
     app.add_error_handler(on_error)
 

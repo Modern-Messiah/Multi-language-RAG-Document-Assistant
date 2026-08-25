@@ -25,6 +25,11 @@ ChromaDB vector store, OpenAI embeddings and chat.
 - **Document Management**: List what is indexed and delete one document at a
   time. Re-uploading a file under the same name replaces the earlier revision
   rather than letting both answer questions.
+- **Answers You Can Rate**: 👍/👎 under every answer in both clients. A rating
+  carries the question, the answer, the documents behind it and the request id,
+  so a complaint becomes a case the evaluation harness can measure instead of a
+  story. `python -m evaluation.from_feedback` turns the collected ones into
+  golden-case stubs.
 - **Traceable Failures**: Every request carries an id, every log line records
   it, and it comes back in the `X-Request-ID` header - so a user reporting "it
   broke" hands over one string that finds their lines. `/ready` reports whether

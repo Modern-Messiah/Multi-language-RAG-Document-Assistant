@@ -191,11 +191,16 @@ class FakeChatClient:
 def make_settings(tmp_path, **overrides):
     from app.config import Settings
 
+    # Every path a test can write to must land in tmp_path. Leaving
+    # feedback_dir at its default let the first run of the feedback tests append
+    # to the repository's own data/feedback, and tests then read each other's
+    # records - which is how it was noticed.
     defaults = dict(
         openai_api_key="test-key-not-real",
         backend_api_key=TEST_API_KEY,
         upload_dir=tmp_path / "uploads",
         chroma_persist_dir=tmp_path / "chroma",
+        feedback_dir=tmp_path / "feedback",
     )
     defaults.update(overrides)
     return Settings(_env_file=None, **defaults)

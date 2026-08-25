@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -82,6 +82,42 @@ class DeleteResponse(BaseModel):
 
 
 class ClearResponse(BaseModel):
+    message: str
+
+
+class FeedbackRequest(BaseModel):
+    """A rating of one answer, sent back by the client that showed it.
+
+    The client sends the exchange rather than the server remembering it: the API
+    stays stateless, nothing has to expire, and a replica that did not serve the
+    query can still take the rating. The cost is trusting the client's copy of
+    its own conversation, which is the same trust the history field already
+    requires.
+    """
+
+    rating: Literal["up", "down"]
+    user_id: str = USER_ID_FIELD
+    question: str = Field(..., min_length=1, max_length=4000)
+    # The answer that was rated. Optional because a rating is still worth
+    # keeping without it, and long answers are already split for Telegram.
+    answer: str = Field(default="", max_length=8000)
+    # Filenames as shown to the user, not chunk ids: a golden case is written
+    # in terms of documents.
+    sources: List[str] = Field(default_factory=list, max_length=20)
+    # The id of the *rated* request, from its X-Request-ID header - the thread
+    # back to the log lines that produced the answer. Optional: a rating whose
+    # client did not keep the header is better recorded than dropped.
+    request_id: Optional[str] = Field(
+        default=None, max_length=64, pattern=r"^[A-Za-z0-9._-]+$"
+    )
+    comment: Optional[str] = Field(default=None, max_length=1000)
+    language: str = Field(default="", max_length=32)
+    # Which surface produced it, so "the bot's answers are worse" becomes a
+    # number. Constrained because it is written into a file operators read.
+    client: str = Field(default="", max_length=16, pattern=r"^[a-z]*$")
+
+
+class FeedbackResponse(BaseModel):
     message: str
 
 

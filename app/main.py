@@ -26,10 +26,13 @@ from fastapi.security import APIKeyHeader
 from openai import APITimeoutError, RateLimitError
 
 from app.config import Settings, get_settings
+from app.feedback import FeedbackStorageFull, store_from_settings
 from app.models.schemas import (
     ClearResponse,
     DeleteResponse,
     DocumentListResponse,
+    FeedbackRequest,
+    FeedbackResponse,
     QueryRequest,
     QueryResponse,
     UploadResponse,
@@ -147,6 +150,9 @@ async def lifespan(app: FastAPI):
         )
 
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
+
+    # None when FEEDBACK_ENABLED is off, which is what the endpoint checks.
+    app.state.feedback = store_from_settings(settings)
 
     app.state.loader = DocumentLoader()
     app.state.chunker = TextChunker(
@@ -598,3 +604,50 @@ def delete_document(
         file_hash=file_hash,
         chunks_removed=removed,
     )
+
+
+# =========================
+# Answer feedback
+# =========================
+# Deliberately `def`: it appends to a file, which blocks.
+@router.post("/feedback", response_model=FeedbackResponse)
+def submit_feedback(request: Request, payload: FeedbackRequest):
+    """Record one rating of one answer.
+
+    The golden set the evaluation harness measures against was written by
+    guessing what people would ask. A rating carries the real question, the
+    answer and the sources behind it, so a complaint becomes a case that can be
+    measured instead of a story.
+    """
+    store = getattr(request.app.state, "feedback", None)
+    if store is None:
+        # FEEDBACK_ENABLED is off: the feature does not exist in this
+        # deployment, which is what 404 says. Nothing is created on disk.
+        raise HTTPException(status_code=404, detail="Feedback collection is disabled")
+
+    try:
+        store.record(
+            rating=payload.rating,
+            user_id=payload.user_id,
+            question=payload.question,
+            answer=payload.answer,
+            sources=payload.sources,
+            request_id=payload.request_id,
+            comment=payload.comment,
+            language=payload.language,
+            client=payload.client,
+        )
+    except FeedbackStorageFull:
+        logger.warning(
+            "Feedback storage is full at %s bytes; rotate the file",
+            request.app.state.settings.feedback_max_bytes,
+        )
+        raise HTTPException(
+            status_code=507,
+            detail="Feedback storage is full. The operator needs to rotate it.",
+        )
+    except OSError:
+        logger.exception("Could not write feedback")
+        raise HTTPException(status_code=503, detail="Feedback storage unavailable")
+
+    return FeedbackResponse(message="Thanks - recorded.")

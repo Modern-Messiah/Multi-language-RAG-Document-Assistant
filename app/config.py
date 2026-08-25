@@ -85,6 +85,19 @@ class Settings(BaseSettings):
     upload_dir: Path = Path("data/uploads")
     max_file_size: int = Field(default=30 * 1024 * 1024, ge=1)  # 30 MB
 
+    # --- Answer feedback ---
+    # Ratings are stored only when a user presses a button, so nothing is
+    # recorded unasked - but the record does contain their question and the
+    # answer, which is the operator's decision to make, not this file's.
+    # Setting this to false makes POST /feedback answer 404 and creates nothing
+    # on disk.
+    feedback_enabled: bool = True
+    feedback_dir: Path = Path("data/feedback")
+    # The file is append-only and never rotated here. At the cap, new ratings
+    # are refused with 507 rather than filling the volume the vector store
+    # lives on; move the file aside to start a fresh one.
+    feedback_max_bytes: int = Field(default=10 * 1024 * 1024, ge=1)  # 10 MB
+
     @model_validator(mode="after")
     def _api_key_is_header_safe(self) -> "Settings":
         # HTTP header values are latin-1 on the wire while clients send UTF-8,

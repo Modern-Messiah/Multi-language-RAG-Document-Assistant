@@ -26,6 +26,7 @@ __all__ = [
     "backend_url",
     "describe_error",
     "error_from_response",
+    "feedback_enabled",
     "max_file_bytes",
     "max_file_mb",
 ]
@@ -68,6 +69,24 @@ def max_file_bytes() -> int:
 
 def max_file_mb() -> int:
     return max_file_bytes() // (1024 * 1024)
+
+
+# Values pydantic-settings accepts as false for a bool field, so a client and
+# the backend read the same .env line the same way.
+_FALSE = frozenset({"0", "false", "f", "no", "n", "off"})
+
+
+def feedback_enabled() -> bool:
+    """Whether to offer rating buttons at all.
+
+    Mirrors FEEDBACK_ENABLED the way max_file_bytes mirrors MAX_FILE_SIZE. The
+    backend remains the authority - it answers 404 when collection is off - but
+    a button that always fails is worse than no button.
+    """
+    raw = os.getenv("FEEDBACK_ENABLED", "").strip().lower()
+    if not raw:
+        return True  # the backend's own default
+    return raw not in _FALSE
 
 
 def describe_error(status_code: int, detail=None, request_id=None) -> str:

@@ -371,11 +371,74 @@ Removes one document: its chunks **and** the raw file behind it.
 -   **Errors**: `401`, `404` (no such document for this owner), `422` (malformed hash
     or `user_id`), `503`.
 
+### `POST /feedback`
+Records one rating of one answer. Requires `FEEDBACK_ENABLED`.
+-   **Body**: `{"rating": "up"|"down", "user_id": "...", "question": "...",
+    "answer": "...", "sources": ["policy.docx"], "request_id": "...",
+    "comment": "...", "language": "...", "client": "web"}`. Only `rating`,
+    `user_id` and `question` are required; `request_id` is the `X-Request-ID` of
+    the request being rated.
+-   **Response**: `{"message": "Thanks - recorded."}`
+-   **Errors**: `401`, `404` (collection disabled), `422`,
+    `507` (the file is at `FEEDBACK_MAX_BYTES`), `503` (the write failed).
+-   The client sends the exchange rather than the server remembering it, so the
+    API stays stateless and a replica that did not serve the query can still
+    take the rating.
+
 ### `POST /clear`
 Deletes the caller's documents: both the vectors **and** the raw uploaded files on disk.
 -   **Query Parameters**: `user_id` (**required**).
 -   **Response**: `{"message": "Documents cleared successfully"}`
 -   **Errors**: `401`, `422`, `500` (deletion failed).
+
+## Answer feedback
+
+The golden set in `evaluation/golden.py` is questions *I* wrote. It guards the
+properties worth protecting, but it measures guesses about what people ask. A
+thumbs-down is the opposite: a real question that got a real bad answer, with the
+documents that produced it and the request id that finds it in the log.
+
+Both clients put 👍/👎 under each answer. The web UI keeps the rating in session
+state so the buttons give way to an acknowledgement; the bot uses an inline
+keyboard and removes it once pressed, because a second press would record a
+second rating of the same answer. Telegram allows 64 bytes of callback data, far
+too little for a question, so the button carries the request id and the bot holds
+the last 20 exchanges per chat to look it up. After a restart it holds none, and
+a press then says the answer is too old to rate rather than sending a rating with
+an empty question.
+
+Records land in `FEEDBACK_DIR/feedback.jsonl`, one JSON object per line:
+
+```json
+{"at": "2026-08-25T12:12:32+00:00", "rating": "down", "user_id": "42",
+ "question": "Сколько дней отпуска у инженера?", "answer": "...",
+ "sources": ["policy.docx"], "request_id": "bb42c28f0a211d46",
+ "comment": "Ответил про директора", "language": "Auto", "client": "telegram"}
+```
+
+**Only rated exchanges are stored.** Logging every question would be a larger
+privacy decision taken on the operator's behalf; pressing a button is the user
+saying "look at this one". `FEEDBACK_ENABLED=false` turns even that off - the
+endpoint answers 404, the clients draw no buttons, and nothing is created on
+disk. The timestamp is the server's: a client's clock is only useful for lining
+up against a client's log.
+
+The file is appended under a lock and never rotated automatically. At
+`FEEDBACK_MAX_BYTES` new ratings are refused with `507` rather than filling the
+volume the vector store lives on; move the file aside to start a fresh one.
+
+To read what has been collected:
+
+```bash
+python -m evaluation.from_feedback                       # negative ratings
+python -m evaluation.from_feedback --up --limit 50       # the ones people liked
+```
+
+It prints how many ratings there are, which documents are behind the negative
+ones, and a `GoldenCase(...)` stub per question with `expected_sources=[]` left
+blank. Deliberately blank: which document *should* have answered is a judgement
+about the corpus, and a stub that guessed would turn one bad answer into a
+permanently wrong benchmark.
 
 ## Observability
 
@@ -520,6 +583,9 @@ variable of the same name, read from `.env` or the process environment.
 | `COLLECTION_NAME` | ChromaDB collection name. | `documents` |
 | `UPLOAD_DIR` | Where raw uploads are stored. | `data/uploads` |
 | `MAX_FILE_SIZE` | Maximum accepted upload, in bytes. | `31457280` (30 MB) |
+| `FEEDBACK_ENABLED` | Whether answers can be rated. Off makes `POST /feedback` answer 404 and creates nothing on disk. | `True` |
+| `FEEDBACK_DIR` | Where `feedback.jsonl` is written. | `data/feedback` |
+| `FEEDBACK_MAX_BYTES` | Cap on that file. At the cap new ratings are refused with 507 instead of filling the volume. | `10485760` (10 MB) |
 | `TELEGRAM_BOT_TOKEN` | Required by the bot only; read directly by `clients/telegram_bot.py`. | - |
 | `BACKEND_URL` | Backend base URL used by the frontend and bot. Compose overrides it to `http://backend:8000`. | `http://localhost:8000` |
 
@@ -637,6 +703,10 @@ nobody re-reads rot into noise; these cover the properties worth protecting,
 including a question that mentions "solar" but is about storage, and a Russian
 question against a Russian document.
 
+It is also, unavoidably, questions I made up. The way it grows out of that is
+collected ratings: see Answer feedback above, and
+`python -m evaluation.from_feedback` for the stubs.
+
 Nothing in `evaluation/` ships in the image.
 
 ### Relevance filtering
@@ -682,6 +752,7 @@ subsequent search. To switch models, delete the collection directory
 │   ├── main.py                 # API entry point, app factory, auth
 │   ├── config.py               # pydantic-settings Settings (single source of truth)
 │   ├── observability.py        # Request ids, access log, readiness checks
+│   ├── feedback.py             # The rating log and the reports read off it
 │   ├── models/                 # Pydantic models (QueryRequest, QueryResponse)
 │   ├── rag/                    # RAG core logic
 │   │   ├── languages.py        # The one language table both clients derive from
@@ -703,7 +774,7 @@ subsequent search. To switch models, delete the collection directory
 │   ├── test_document_loader.py # Encoding handling
 │   ├── test_embeddings.py      # Vector store operations
 │   └── test_upload_errors.py   # Upload failure modes
-├── evaluation/                 # Retrieval metrics, golden set, manual eval script
+├── evaluation/                 # Retrieval metrics, golden set, eval and feedback scripts
 ├── .github/workflows/ci.yml    # Lint + tests + docker build
 ├── data/
 │   ├── uploads/                # Raw file storage
