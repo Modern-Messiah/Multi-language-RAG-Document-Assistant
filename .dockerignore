@@ -8,6 +8,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 tests/
+evaluation/
 *.md
 # 4.3 MB of README demo GIFs that the running services never read
 app/docs/assets/

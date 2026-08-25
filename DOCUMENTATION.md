@@ -133,7 +133,7 @@ python -m clients.telegram_bot                 # bot
 
 ```bash
 pip install -r requirements-dev.txt
-ruff check app frontend clients tests
+ruff check app frontend clients evaluation tests
 pytest -q
 ```
 
@@ -457,6 +457,45 @@ regardless. A first question makes no extra call, so the common case costs
 nothing new, and if the rewrite fails the original question is used - a
 condensing hiccup degrades the answer rather than breaking the request.
 
+### Measuring retrieval
+
+Every retrieval knob - `TOP_K_RESULTS`, `CHUNK_SIZE`, `RELEVANCE_THRESHOLD` -
+used to be set by reasoning rather than measurement. `evaluation/` has two
+halves that measure different things, and conflating them is how a harness
+starts lying.
+
+**Offline, in CI** (`tests/test_retrieval_quality.py`). A small labelled corpus
+is indexed with a deterministic bag-of-words embedder and run through the real
+retrieval path, then scored with recall@k, precision@k and MRR. Because the
+embedder is not a real one, this says **nothing about embedding quality**. What
+it catches is a change that breaks filtering, ordering, chunking or tenant
+scoping badly enough that the right chunk stops coming back - regressions the
+rest of the suite cannot see, since its fake vectors are random and every
+ranking is therefore arbitrary.
+
+**By hand, against a live backend** (`evaluation/run_eval.py`). This is the half
+with real embeddings, and the only one that can answer "what should
+`RELEVANCE_THRESHOLD` be?".
+
+```bash
+python -m evaluation.run_eval --url http://127.0.0.1:8000 --api-key <key>
+```
+
+It uploads the golden corpus under a scratch tenant, asks every golden question
+plus a few the corpus cannot answer, prints the metrics, and clears up after
+itself. Read the backend's per-query `retrieval ... similarity_best=...` lines
+alongside it: the answerable questions show what a real match scores, the
+unanswerable ones show what noise scores, and the threshold belongs between
+them - closer to the noise end, because one set too high drops relevant context
+silently.
+
+The golden set in `evaluation/golden.py` is deliberately small. A hundred cases
+nobody re-reads rot into noise; these cover the properties worth protecting,
+including a question that mentions "solar" but is about storage, and a Russian
+question against a Russian document.
+
+Nothing in `evaluation/` ships in the image.
+
 ### Relevance filtering
 
 Retrieval returns `TOP_K_RESULTS` chunks whether or not the corpus has anything
@@ -520,6 +559,7 @@ subsequent search. To switch models, delete the collection directory
 │   ├── test_document_loader.py # Encoding handling
 │   ├── test_embeddings.py      # Vector store operations
 │   └── test_upload_errors.py   # Upload failure modes
+├── evaluation/                 # Retrieval metrics, golden set, manual eval script
 ├── .github/workflows/ci.yml    # Lint + tests + docker build
 ├── data/
 │   ├── uploads/                # Raw file storage
@@ -544,7 +584,7 @@ with `concurrency` cancelling superseded runs:
   committed - a dependency change without a regenerated lock cannot merge.
 - **test**: installs `requirements-dev.lock` with `--require-hashes` on Python
   3.10 (the same transitive versions the image ships), runs
-  `ruff check app frontend clients tests`, then `pytest -q` with a dummy
+  `ruff check app frontend clients evaluation tests`, then `pytest -q` with a dummy
   `OPENAI_API_KEY`.
 - **docker**: builds the image, prints its size, asserts no compiler is present
   in the runtime stage, then starts the container and probes `/health` - a build

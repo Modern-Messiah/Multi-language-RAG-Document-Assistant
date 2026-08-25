@@ -99,7 +99,7 @@ All three read the same `.env` from the repository root.
 
 ```bash
 pip install -r requirements-dev.txt
-ruff check app frontend clients tests
+ruff check app frontend clients evaluation tests
 pytest -q
 ```
 
