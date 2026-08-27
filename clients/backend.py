@@ -12,6 +12,7 @@ client, because the two use different libraries: `requests` in Streamlit,
 """
 import os
 
+from app.humanize import describe_quota, human_size
 from app.observability import REQUEST_ID_HEADER
 from app.rag.languages import AUTO_LANGUAGE, SUPPORTED_LANGUAGES
 
@@ -25,8 +26,10 @@ __all__ = [
     "api_headers",
     "backend_url",
     "describe_error",
+    "describe_quota",
     "error_from_response",
     "feedback_enabled",
+    "human_size",
     "max_file_bytes",
     "max_file_mb",
 ]

@@ -22,6 +22,7 @@ from clients.backend import (  # noqa: E402
     SUPPORTED_LANGUAGES,
     api_headers,
     backend_url,
+    describe_quota,
     error_from_response,
     feedback_enabled,
     max_file_mb,
@@ -247,6 +248,7 @@ with st.sidebar:
     st.header("📚 Your documents")
 
     indexed_documents = []
+    quota_line = ""
     try:
         listing = requests.get(
             f"{API_URL}/documents",
@@ -258,7 +260,11 @@ with st.sidebar:
         st.warning(f"Could not reach the backend: {e}")
     else:
         if listing.status_code == 200:
-            indexed_documents = listing.json()["documents"]
+            body = listing.json()
+            indexed_documents = body["documents"]
+            # .get(): an older backend has no quota block, and the page must
+            # not crash over a missing caption.
+            quota_line = describe_quota(body.get("quota"))
         else:
             st.warning(backend_error(listing))
 
@@ -287,6 +293,11 @@ with st.sidebar:
                         # The uploader still holds the file; without clearing
                         # that record the next rerun would re-upload it.
                         st.session_state.pop("indexed_files", None)
+                        # And forget past rejections: a file refused for being
+                        # over quota is exactly what the user is now making
+                        # room for, and a remembered failure would skip it
+                        # silently on the next attempt.
+                        st.session_state.pop("failed_files", None)
                         st.session_state["uploader_key"] += 1
                         st.rerun()
                     else:
@@ -343,11 +354,16 @@ with st.sidebar:
         except requests.RequestException as e:
             st.error(f"Backend unreachable: {e}")
 
+    # The per-owner limits come from the backend's own answer, not from a
+    # mirrored setting: a UI that advertised a limit the API did not enforce
+    # was how "Any number of documents" stood here after quotas shipped.
+    limits = [f"Up to **{MAX_FILE_MB} MB per file**"]
+    if quota_line:
+        limits.insert(0, f"You hold **{quota_line}**")
     st.info(
         "📌 **Limits**\n\n"
-        "- Any number of documents\n"
-        f"- Up to **{MAX_FILE_MB} MB per file**\n"
-        "- Supported formats: **TXT, PDF**"
+        + "\n".join(f"- {line}" for line in limits)
+        + f"\n- Supported formats: **{UPLOAD_LABEL}**"
     )
 
 # =========================

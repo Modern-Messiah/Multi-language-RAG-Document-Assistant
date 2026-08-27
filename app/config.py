@@ -85,6 +85,19 @@ class Settings(BaseSettings):
     upload_dir: Path = Path("data/uploads")
     max_file_size: int = Field(default=30 * 1024 * 1024, ge=1)  # 30 MB
 
+    # --- Per-owner quotas ---
+    # Until these existed the only bound was MAX_FILE_SIZE, on one file. One
+    # user_id could fill the volume the vector store lives on, and every upload
+    # is paid embedding calls with no ceiling. 0 disables a limit.
+    #
+    # These ship ON with generous defaults, unlike RELEVANCE_THRESHOLD and
+    # MMR_LAMBDA, which ship off. The difference is how they fail: a wrong
+    # threshold silently drops relevant context, while an exceeded quota is a
+    # 413 with the numbers in it. A blind default is acceptable when overshoot
+    # is loud.
+    max_documents_per_user: int = Field(default=200, ge=0)
+    max_bytes_per_user: int = Field(default=1024 * 1024 * 1024, ge=0)  # 1 GiB
+
     # --- Answer feedback ---
     # Ratings are stored only when a user presses a button, so nothing is
     # recorded unasked - but the record does contain their question and the

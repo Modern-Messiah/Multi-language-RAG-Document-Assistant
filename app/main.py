@@ -5,7 +5,9 @@ import os
 import re
 import secrets
 import shutil
+import threading
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import (
@@ -25,16 +27,23 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from openai import APITimeoutError, RateLimitError
 
+from app.activity import ActivityTracker, is_owner_name
 from app.config import Settings, get_settings
 from app.feedback import FeedbackStorageFull, store_from_settings
+from app.humanize import human_size
 from app.models.schemas import (
     ClearResponse,
     DeleteResponse,
     DocumentListResponse,
     FeedbackRequest,
     FeedbackResponse,
+    OrphanEntry,
     QueryRequest,
     QueryResponse,
+    QuotaUsage,
+    SweepEntry,
+    SweepFailure,
+    SweepResponse,
     UploadResponse,
 )
 from app.observability import (
@@ -78,19 +87,6 @@ MAX_EXT_LEN = 10
 def _openai_timeout(request: Request) -> float:
     """The configured OpenAI timeout, for log messages."""
     return request.app.state.settings.openai_timeout
-
-
-def human_size(num_bytes: int) -> str:
-    """Render a byte count in the largest unit that keeps it readable.
-
-    Formatting MB with "{:.0f}" alone reported a 1 KB limit as "0 MB".
-    """
-    for unit, size in (("MB", 1024 * 1024), ("KB", 1024)):
-        if num_bytes >= size:
-            # One decimal, but "5.0 MB" reads worse than "5 MB".
-            value = f"{num_bytes / size:.1f}".rstrip("0").rstrip(".")
-            return f"{value} {unit}"
-    return f"{num_bytes} bytes"
 
 
 def safe_filename(name: str) -> str:
@@ -153,6 +149,14 @@ async def lifespan(app: FastAPI):
 
     # None when FEEDBACK_ENABLED is off, which is what the endpoint checks.
     app.state.feedback = store_from_settings(settings)
+
+    # Who was here when - what lets the sweep tell an abandoned namespace from
+    # a quiet one.
+    app.state.activity = ActivityTracker(settings.upload_dir)
+    # Owners from before markers existed get one now, so "idle" means "idle
+    # since the upgrade" rather than "has not uploaded lately".
+    app.state.activity.seed_missing()
+    app.state.upload_locks = OwnerLocks()
 
     app.state.loader = DocumentLoader()
     app.state.chunker = TextChunker(
@@ -308,6 +312,25 @@ def upload_document(
 
     file_hash = hashlib.sha256(contents).hexdigest()[:16]
 
+    # One upload at a time per owner from here on, and the dedup lookup is
+    # inside the fence with everything else. The quota check is a read followed
+    # by a write, and two uploads from the same owner arriving together - the
+    # web UI sends a multi-file selection back to back, the bot handles updates
+    # concurrently - would both read "room for one more" and both proceed. Held
+    # through indexing, so the second sees the first's document in the count and
+    # not merely its file on disk.
+    #
+    # The duplicate answer needs the fence too: outside it, an upload could
+    # confirm a document is indexed and answer 200 while a sweep, already past
+    # its own re-check, deletes the namespace underneath - leaving the user told
+    # their document is there when it no longer is.
+    with state.upload_locks.for_owner(user_id):
+        return _store_and_index(state, settings, user_id, safe_name, file_hash, contents)
+
+
+def _store_and_index(state, settings, user_id, safe_name, file_hash, contents) -> UploadResponse:
+    """The half of an upload that changes what the owner holds."""
+
     # ♻️ Identical content already indexed for this owner - skip re-embedding
     try:
         already_indexed = state.embeddings.has_file_hash(file_hash, user_id)
@@ -316,6 +339,7 @@ def upload_document(
         raise HTTPException(status_code=503, detail="Vector store unavailable")
 
     if already_indexed:
+        state.activity.touch(user_id)
         return UploadResponse(
             message="Document already indexed (identical content)",
             filename=safe_name,
@@ -323,6 +347,26 @@ def upload_document(
             duplicate=True,
             file_hash=file_hash,
         )
+
+    # 📏 Quota, checked after dedup (an identical re-upload adds nothing and
+    # must succeed even at the limit) and before anything is written. A new
+    # revision of an existing filename replaces the old one, so what the old
+    # revision holds is not counted against this upload.
+    try:
+        superseded = state.embeddings.file_hashes_for_source(safe_name, user_id)
+        documents, total_bytes = _owner_usage(
+            state, settings, user_id, exclude_hashes=superseded
+        )
+    except Exception:
+        logger.exception("Quota lookup failed")
+        raise HTTPException(status_code=503, detail="Vector store unavailable")
+
+    problem = _quota_problem(settings, documents, total_bytes, len(contents), user_id)
+    if problem:
+        # 413, not 403 or 429: both clients hide 401/403 as an operator
+        # problem, and 429 tells them to retry, which will not help. 413 is
+        # shown to the user verbatim, and it says what to do.
+        raise HTTPException(status_code=413, detail=problem)
 
     # 💾 Save file under the user's own directory, keyed by content hash.
     # user_id is validated ([A-Za-z0-9_-]{1,64}), so it is path-safe as-is.
@@ -382,6 +426,7 @@ def upload_document(
     # from which revision. Done after the new one is safely indexed, so a
     # failure above never leaves the owner with neither.
     replaced = _retire_older_revisions(state, settings, safe_name, file_hash, user_id)
+    state.activity.touch(user_id)
 
     return UploadResponse(
         message="Document processed successfully",
@@ -429,12 +474,129 @@ def _remove_stored_file(settings: Settings, user_id: str, file_hash: str) -> Non
         path.unlink(missing_ok=True)
 
 
+# =========================
+# Per-owner quotas
+# =========================
+class OwnerLocks:
+    """One lock per owner, so an owner's uploads happen one at a time.
+
+    Striped rather than one lock per user_id: the web UI mints a new owner per
+    browser session, and a dictionary keyed on those would grow for as long as
+    the process lived. 64 stripes means two unrelated owners occasionally wait
+    on each other, which costs a moment; a lock per owner would cost memory
+    forever.
+    """
+
+    STRIPES = 64
+
+    def __init__(self):
+        self._locks = [threading.Lock() for _ in range(self.STRIPES)]
+
+    def for_owner(self, user_id: str) -> threading.Lock:
+        # sha256 rather than hash(): the latter is salted per process, which
+        # does not matter here but makes debugging a stripe collision odd.
+        digest = hashlib.sha256(user_id.encode("utf-8")).digest()
+        return self._locks[digest[0] % self.STRIPES]
+
+
+def _owner_usage(state, settings: Settings, user_id: str, exclude_hashes=()) -> tuple:
+    """(documents, bytes) this owner holds, leaving out `exclude_hashes`.
+
+    Documents are counted in the vector store and bytes on disk, because those
+    are the two things the limits are about: what the store has to search
+    through, and what the volume has to hold. Stored files are named
+    "<hash>_<name>", which is how a file is matched to a document.
+
+    Only files that back a listed document are counted. A file with no vectors
+    behind it - left by a crash between write and index, or by the /clear of
+    an earlier version that deleted vectors only - is invisible in /documents
+    and cannot be deleted through the API, so counting it would present the
+    user with a limit they have no way to get under. Such orphans are the
+    sweep's to reconcile.
+    """
+    excluded = set(exclude_hashes)
+    held = {
+        d["file_hash"] for d in state.embeddings.list_documents(user_id)
+        if d["file_hash"] not in excluded
+    }
+
+    return len(held), sum(
+        _size_of(path) for path in _stored_files(settings, user_id)
+        if path.name.split("_", 1)[0] in held
+    )
+
+
+def _stored_files(settings: Settings, user_id: str) -> list:
+    owner_dir = settings.upload_dir / user_id
+    if not owner_dir.is_dir():
+        return []
+    return [path for path in owner_dir.iterdir() if path.is_file()]
+
+
+def _size_of(path) -> int:
+    """Bytes on disk, or 0 if the file is already gone.
+
+    Every caller lists a directory and then stats what it found, and a delete
+    or a retired revision can remove a file in between - the listing is not
+    always under the owner's lock. A vanished file is worth nothing towards a
+    quota, not a 500.
+    """
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _quota_problem(settings: Settings, documents: int, total_bytes: int,
+                   adding_bytes: int, user_id: str = "") -> Optional[str]:
+    """Why an upload of `adding_bytes` may not proceed, or None if it may.
+
+    The wording follows the other user-facing limits: it says what the limit
+    is and what to do, and names no environment variable - that goes to the
+    log, where the person who can change it is reading.
+    """
+    if settings.max_documents_per_user and documents + 1 > settings.max_documents_per_user:
+        logger.warning(
+            "Quota refused upload for user_id=%s: %d documents at "
+            "MAX_DOCUMENTS_PER_USER=%d",
+            user_id, documents, settings.max_documents_per_user,
+        )
+        return (
+            f"Document limit reached: you hold {documents} of "
+            f"{settings.max_documents_per_user}. Remove documents you no longer "
+            "need, or ask the operator to raise the limit."
+        )
+    if settings.max_bytes_per_user and total_bytes + adding_bytes > settings.max_bytes_per_user:
+        logger.warning(
+            "Quota refused upload for user_id=%s: %d + %d bytes at "
+            "MAX_BYTES_PER_USER=%d",
+            user_id, total_bytes, adding_bytes, settings.max_bytes_per_user,
+        )
+        return (
+            f"Storage limit reached: this upload would take you to "
+            f"{human_size(total_bytes + adding_bytes)} of "
+            f"{human_size(settings.max_bytes_per_user)}. Remove documents you no "
+            "longer need, or ask the operator to raise the limit."
+        )
+    return None
+
+
+def _quota_usage(state, settings: Settings, user_id: str) -> QuotaUsage:
+    documents, total_bytes = _owner_usage(state, settings, user_id)
+    return QuotaUsage(
+        documents=documents,
+        max_documents=settings.max_documents_per_user,
+        bytes=total_bytes,
+        max_bytes=settings.max_bytes_per_user,
+    )
+
+
 # `def`, not `async def` - see the note on upload_document. The chain's OpenAI
 # calls are synchronous, so as a coroutine this blocked the whole event loop.
 @router.post("/query", response_model=QueryResponse)
 def query_rag(request: Request, payload: QueryRequest):
     try:
-        return request.app.state.rag_chain.ask(
+        answer = request.app.state.rag_chain.ask(
             question=payload.question,
             language=payload.language,
             user_id=payload.user_id,
@@ -458,19 +620,44 @@ def query_rag(request: Request, payload: QueryRequest):
         logger.exception("Query failed")
         raise HTTPException(status_code=503, detail="Query failed")
 
+    request.app.state.activity.touch(payload.user_id)
+    return answer
+
 
 # `def`, not `async def`: deleting from ChromaDB and rmtree-ing the upload
 # directory are both blocking calls.
 @router.post("/clear", response_model=ClearResponse)
 def clear_documents(request: Request, user_id: str = USER_ID_QUERY):
     state = request.app.state
-    settings: Settings = state.settings
 
     try:
-        state.embeddings.delete_documents(filter={"user_id": user_id})
+        _clear_namespace(state, state.settings, user_id)
     except Exception:
         logger.exception("Error clearing documents")
         raise HTTPException(status_code=500, detail="Failed to clear documents")
+
+    return ClearResponse(message="Documents cleared successfully")
+
+
+def _clear_namespace(state, settings: Settings, user_id: str) -> None:
+    """Remove everything one owner has: vectors, raw uploads, activity marker.
+
+    Shared by /clear and the idle-namespace sweep so the two cannot drift
+    into deleting different things. Raises if the vectors cannot be deleted;
+    a leftover file is logged, since the data the user cares about is gone.
+
+    Takes the owner's upload lock. Without it a sweep could run between an
+    upload's write_bytes and its add_documents and remove the file from under
+    it - the upload then answers 200 with nothing stored, or a spurious 400.
+    The exact owner a sweep targets is one who has just come back.
+    """
+    with state.upload_locks.for_owner(user_id):
+        _wipe_namespace(state, settings, user_id)
+
+
+def _wipe_namespace(state, settings: Settings, user_id: str) -> None:
+    """_clear_namespace without the lock, for a caller that already holds it."""
+    state.embeddings.delete_documents(filter={"user_id": user_id})
 
     # Drop the raw uploads too. Deleting only the vectors left every file the
     # user ever sent on disk forever - unbounded volume growth, and "cleared"
@@ -482,7 +669,7 @@ def clear_documents(request: Request, user_id: str = USER_ID_QUERY):
         if owner_dir.exists():
             logger.warning("Could not fully remove upload dir for %s", user_id)
 
-    return ClearResponse(message="Documents cleared successfully")
+    state.activity.forget(user_id)
 
 
 def _sse(event: dict) -> str:
@@ -528,6 +715,10 @@ def query_rag_stream(request: Request, payload: QueryRequest):
         logger.exception("Query failed")
         raise HTTPException(status_code=503, detail="Query failed")
 
+    # Recorded once retrieval has succeeded, not when the stream ends: the
+    # owner was here whether or not the model finished its sentence.
+    request.app.state.activity.touch(payload.user_id)
+
     def events():
         yield _sse(first_event)
         try:
@@ -562,15 +753,23 @@ def list_documents(request: Request, user_id: str = USER_ID_QUERY):
     nothing at all, so the only way to fix one stale file was to clear
     everything and re-upload.
     """
+    state = request.app.state
     try:
-        documents = request.app.state.embeddings.list_documents(user_id)
+        documents = state.embeddings.list_documents(user_id)
+        quota = _quota_usage(state, state.settings, user_id)
     except Exception:
         logger.exception("Could not list documents")
         raise HTTPException(status_code=503, detail="Vector store unavailable")
 
+    # Only a namespace that holds something is worth keeping alive. The web UI
+    # lists on every rerun under a fresh per-session owner, and a marker per
+    # page view would fill the activity directory with nothing.
+    if documents:
+        state.activity.touch(user_id)
     return DocumentListResponse(
         documents=documents,
         total_chunks=sum(doc["chunks"] for doc in documents),
+        quota=quota,
     )
 
 
@@ -598,6 +797,7 @@ def delete_document(
         raise HTTPException(status_code=404, detail="No such document")
 
     _remove_stored_file(settings, user_id, file_hash)
+    state.activity.touch(user_id)
 
     return DeleteResponse(
         message="Document deleted",
@@ -650,4 +850,202 @@ def submit_feedback(request: Request, payload: FeedbackRequest):
         logger.exception("Could not write feedback")
         raise HTTPException(status_code=503, detail="Feedback storage unavailable")
 
+    request.app.state.activity.touch(payload.user_id)
     return FeedbackResponse(message="Thanks - recorded.")
+
+
+# =========================
+# Idle-namespace sweep
+# =========================
+# The web UI mints a fresh owner per browser session, so its documents are
+# orphaned the moment the tab closes and can never be reached again - and since
+# Stage 14 they are faithfully copied into every backup. This finds namespaces
+# nobody has touched in `idle_days` and, when asked twice, removes them.
+#
+# In-process rather than an offline script because ChromaDB must have a single
+# writer: the same reason backup and restore insist the backend is stopped.
+# Everything is a dry run unless apply=true, and apply refuses on its own in
+# the situations where the activity data is most likely to be wrong.
+
+# Below this, apply needs force. A typo in a cron line must not sweep
+# yesterday's users; a web session left open over a weekend is not abandoned.
+MIN_IDLE_DAYS_TO_APPLY = 7
+
+# Deliberately `def`: a full metadata scan of the collection plus a stat per
+# owner, none of which yields.
+@router.post("/maintenance/sweep", response_model=SweepResponse)
+def sweep_idle_namespaces(
+    request: Request,
+    idle_days: int = Query(..., ge=1, le=3650),
+    # Required, with the empty string allowed and meaning every owner: the
+    # choice to sweep every tenant has to be written into the request, never
+    # arrived at by leaving something out.
+    prefix: str = Query(..., max_length=64, pattern=r"^[A-Za-z0-9_-]*$"),
+    apply: bool = False,
+    force: bool = False,
+):
+    state = request.app.state
+    settings: Settings = state.settings
+    activity: ActivityTracker = state.activity
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=idle_days)
+
+    # Every name the data knows: owners with vectors, owners with a directory,
+    # owners with a marker. A name that could not be a user_id is reported and
+    # never acted on - ".activity" itself is one, and so is whatever an
+    # operator or a filesystem left there.
+    try:
+        with_vectors = set(state.embeddings.list_owners())
+    except Exception:
+        logger.exception("Could not enumerate owners")
+        raise HTTPException(status_code=503, detail="Vector store unavailable")
+    names = with_vectors | activity.owner_dirs() | activity.known_owners()
+
+    foreign = sorted(name for name in names if not is_owner_name(name))
+    valid = sorted(name for name in names if is_owner_name(name))
+
+    # "Anyone active at all" is judged over every owner, not only the prefix:
+    # after a restore or a long stop everyone looks idle at once, and that is
+    # stale data, not a mass departure. A prefix sweep of web sessions while
+    # Telegram users are busy is fine; a sweep where nobody has been seen is
+    # the one that needs a second look.
+    dated = {name: activity.last_seen(name) for name in valid}
+    known_dates = [seen for seen in dated.values() if seen is not None]
+    newest_seen = max(known_dates) if known_dates else None
+    anyone_active = newest_seen is not None and newest_seen >= cutoff
+
+    candidates, empty, unknown, orphans = [], [], [], []
+    for owner in valid:
+        # Orphan files are looked for under EVERY owner, not only the prefix.
+        # They are most likely under the stable ids the default prefix excludes -
+        # left by a crash between write and index, or by an older /clear that
+        # deleted vectors only - and reporting them costs one lookup. Removing
+        # them stays inside the prefix: an operator who asked to sweep web
+        # sessions should not have files deleted elsewhere.
+        in_scope = owner.startswith(prefix)
+        try:
+            held = {d["file_hash"] for d in state.embeddings.list_documents(owner)}
+        except Exception:
+            logger.exception("Could not list documents for %s during sweep", owner)
+            raise HTTPException(status_code=503, detail="Vector store unavailable")
+
+        files = _stored_files(settings, owner)
+        backed = sum(_size_of(p) for p in files if p.name.split("_", 1)[0] in held)
+        stray = [p for p in files if p.name.split("_", 1)[0] not in held]
+        if stray:
+            orphans.append(OrphanEntry(
+                user_id=owner, files=len(stray),
+                bytes=sum(_size_of(p) for p in stray),
+                in_scope=in_scope,
+            ))
+
+        if not in_scope:
+            continue
+
+        seen = dated[owner]
+        entry = SweepEntry(
+            user_id=owner, documents=len(held), bytes=backed,
+            last_seen=seen.isoformat() if seen else None,
+        )
+        if seen is None:
+            unknown.append(owner)
+        elif seen >= cutoff:
+            # Inclusive: exactly idle_days is not yet idle. No test pins the
+            # difference between >= and >, because cutoff is derived from this
+            # request's own clock and no marker's mtime can be made equal to
+            # it; the choice is here so it is at least deliberate.
+            continue  # active: not this sweep's business
+        elif held or files:
+            candidates.append(entry)
+        else:
+            # A marker or an empty directory left after every document was
+            # deleted. Nothing to lose, so cleaned without ceremony.
+            empty.append(entry)
+
+    refused = None
+    if apply and not force:
+        if not prefix:
+            refused = (
+                "apply without a prefix would sweep every tenant, stable Telegram "
+                "ids included. Pass prefix=web- for the web UI's per-session "
+                "namespaces, or force=true to mean it."
+            )
+        elif idle_days < MIN_IDLE_DAYS_TO_APPLY:
+            refused = (
+                f"apply with idle_days below {MIN_IDLE_DAYS_TO_APPLY} would sweep "
+                "namespaces a returning user still expects. Pass force=true to mean it."
+            )
+        elif activity.touch_failures:
+            refused = (
+                f"{activity.touch_failures} activity update(s) failed since startup, "
+                "so some live owners may look idle. Fix the volume (it is probably "
+                "full), restart, then sweep - or pass force=true."
+            )
+        elif not anyone_active and (candidates or empty):
+            refused = (
+                f"no owner at all has been active in the last {idle_days} days, which "
+                "looks like stale activity data (a restore, a long stop) rather than "
+                "everyone leaving. Pass force=true if it really is everyone."
+            )
+
+    swept, became_active, failed = [], [], []
+    orphans_removed = 0
+    if apply and not refused:
+        for entry in candidates + empty:
+            owner = entry.user_id
+            try:
+                with state.upload_locks.for_owner(owner):
+                    # Re-read under the lock: the owner may have come back while
+                    # the list above was being built.
+                    seen_now = activity.last_seen(owner)
+                    if seen_now is not None and seen_now >= cutoff:
+                        became_active.append(owner)
+                        continue
+                    # Logged BEFORE deleting, so a crash or a failure mid-loop
+                    # still leaves a record of what was about to go; the response
+                    # only exists if the loop ends. The re-check above comes
+                    # first so an owner who came back is not logged as swept.
+                    logger.warning(
+                        "Sweeping idle namespace user_id=%s documents=%d bytes=%d last_seen=%s",
+                        owner, entry.documents, entry.bytes, entry.last_seen,
+                    )
+                    _wipe_namespace(state, settings, owner)
+                swept.append(owner)
+            except Exception as exc:
+                logger.exception("Could not sweep %s", owner)
+                failed.append(SweepFailure(user_id=owner, error=f"{type(exc).__name__}: {exc}"[:200]))
+
+        for orphan in orphans:
+            if not orphan.in_scope or orphan.user_id in swept:
+                continue  # out of scope, or already gone with the namespace
+            try:
+                with state.upload_locks.for_owner(orphan.user_id):
+                    # Recomputed under the lock: an upload since the listing may
+                    # have given a file its vectors.
+                    held = {d["file_hash"] for d in state.embeddings.list_documents(orphan.user_id)}
+                    for path in _stored_files(settings, orphan.user_id):
+                        if path.name.split("_", 1)[0] not in held:
+                            path.unlink()
+                            orphans_removed += 1
+            except Exception as exc:
+                logger.exception("Could not remove orphan files for %s", orphan.user_id)
+                failed.append(SweepFailure(user_id=orphan.user_id, error=f"{type(exc).__name__}: {exc}"[:200]))
+
+    return SweepResponse(
+        idle_days=idle_days,
+        prefix=prefix,
+        dry_run=not (apply and not refused),
+        cutoff=cutoff.isoformat(),
+        newest_seen=newest_seen.isoformat() if newest_seen else None,
+        candidates=candidates,
+        empty=empty,
+        unknown=unknown,
+        foreign=foreign,
+        orphans=orphans,
+        swept=swept,
+        became_active=became_active,
+        failed=failed,
+        orphans_removed=orphans_removed,
+        refused=refused,
+    )

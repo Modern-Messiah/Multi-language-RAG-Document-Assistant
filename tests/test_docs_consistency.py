@@ -225,3 +225,16 @@ def test_the_linter_covers_every_package_of_ours():
     } | {"frontend"}
 
     assert not ours - linted, f"not linted in CI: {sorted(ours - linted)}"
+
+
+def test_every_route_has_a_section_in_the_api_reference():
+    """The reference is wrong in exactly the places a client author reads if a
+    route is added without one. Checked mechanically because the config table
+    and .env.template already are, and the sweep endpoint was nearly missed."""
+    source = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    routes = re.findall(r'@(?:router|application)\.(get|post|delete|put|patch)\("([^"]+)"', source)
+
+    assert routes, "no routes found in app/main.py, so this proves nothing"
+    for method, path in routes:
+        heading = f"### `{method.upper()} {path}`"
+        assert heading in DOCUMENTATION, f"{heading} is missing from the API reference"

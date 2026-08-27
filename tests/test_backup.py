@@ -850,3 +850,111 @@ def test_a_file_that_is_not_an_archive_is_reported_plainly(tmp_path, monkeypatch
 
     assert code == 1
     assert "Cannot read the archive" in capsys.readouterr().err
+
+
+# =========================
+# Activity markers and backups
+# =========================
+
+def test_the_uploads_count_is_files_not_markers(tmp_path, fake_openai_embeddings):
+    """The markers live under the uploads directory and travel with it, but an
+    operator comparing this number before and after a restore is counting
+    their files."""
+    settings = make_settings(tmp_path / "before")
+    _index_a_document(settings)
+    from app.activity import ACTIVITY_DIRNAME
+
+    assert (settings.upload_dir / ACTIVITY_DIRNAME / "u1").exists(), "no marker to exclude"
+
+    manifest = create_backup(
+        tmp_path / "out", settings=settings, locations=storage_locations(settings)
+    )
+
+    assert manifest["counts"]["uploads"] == 1
+
+
+def test_markers_travel_with_the_archive(tmp_path, fake_openai_embeddings):
+    settings = make_settings(tmp_path / "before")
+    _index_a_document(settings)
+
+    archive = create_backup(
+        tmp_path / "out", settings=settings, locations=storage_locations(settings)
+    )["archive"]
+
+    with tarfile.open(archive) as tar:
+        assert "uploads/.activity/u1" in tar.getnames()
+
+
+def test_a_restore_restarts_the_idle_clock(tmp_path, fake_openai_embeddings):
+    """The archive carries the markers with their original mtimes, so restoring
+    last month's snapshot would make everyone look a month idle by
+    construction. Dating them now is the safe direction."""
+    import os
+    import time
+    from datetime import datetime, timedelta, timezone
+
+    from app.activity import ActivityTracker
+
+    original = make_settings(tmp_path / "before")
+    _index_a_document(original)
+    old = time.time() - 40 * 86400
+    # The stored file as well as the marker: last_seen is the newer of the two,
+    # so aging only the marker leaves the owner looking active and this test
+    # would pass whether or not the restore reset anything.
+    for path in [ActivityTracker(original.upload_dir).marker_for("u1"),
+                 *(original.upload_dir / "u1").iterdir()]:
+        os.utime(path, (old, old))
+
+    archive = create_backup(
+        tmp_path / "out", settings=original, locations=storage_locations(original)
+    )["archive"]
+    revived = make_settings(tmp_path / "after")
+    restore_backup(archive, settings=revived, locations=storage_locations(revived))
+
+    seen = ActivityTracker(revived.upload_dir).last_seen("u1")
+    assert seen > datetime.now(timezone.utc) - timedelta(minutes=1)
+
+
+def test_a_directory_holding_only_markers_is_not_occupied(tmp_path):
+    """Docker creates the mount points, and a backend that has run for a
+    minute has already written markers into an otherwise empty uploads
+    directory. Refusing a first restore over that would be absurd."""
+    from app.activity import ACTIVITY_DIRNAME
+
+    archive = _archive_of(tmp_path)
+    target = _locations(tmp_path / "target")
+    (target["uploads"] / ACTIVITY_DIRNAME).mkdir(parents=True)
+    (target["uploads"] / ACTIVITY_DIRNAME / "someone").write_bytes(b"")
+
+    restore_backup(archive, locations=target)
+
+    assert (target["uploads"] / "u1" / "abcdef0123456789_policy.txt").exists()
+
+
+def test_a_restore_dates_an_owner_who_only_ever_asked_questions(tmp_path, fake_openai_embeddings):
+    """/query and /feedback record an owner who has never uploaded, so a marker
+    with no directory behind it is a real state. Restoring one with its old
+    mtime and not resetting it leaves that owner idle by construction."""
+    import os
+    import time
+    from datetime import datetime, timedelta, timezone
+
+    from app.activity import ActivityTracker
+
+    original = make_settings(tmp_path / "before")
+    _index_a_document(original)
+
+    asker = ActivityTracker(original.upload_dir)
+    asker.touch("web-asker")  # no upload directory, only a marker
+    old = time.time() - 40 * 86400
+    os.utime(asker.marker_for("web-asker"), (old, old))
+
+    archive = create_backup(
+        tmp_path / "out", settings=original, locations=storage_locations(original)
+    )["archive"]
+    revived = make_settings(tmp_path / "after")
+    restore_backup(archive, settings=revived, locations=storage_locations(revived))
+
+    seen = ActivityTracker(revived.upload_dir).last_seen("web-asker")
+    assert seen is not None, "the marker did not survive the restore"
+    assert seen > datetime.now(timezone.utc) - timedelta(minutes=1)

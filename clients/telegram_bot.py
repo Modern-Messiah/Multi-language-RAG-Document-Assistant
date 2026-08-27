@@ -28,6 +28,7 @@ from clients.backend import (
     SUPPORTED_LANGUAGES,
     api_headers,
     backend_url,
+    describe_quota,
     error_from_response,
     feedback_enabled,
 )
@@ -148,14 +149,21 @@ def split_for_telegram(text: str, budget: int = _CHUNK_BUDGET) -> list:
     return chunks
 
 
-def format_document_list(documents: list) -> str:
+def format_document_list(documents: list, quota=None) -> str:
     """Render the inventory as one HTML message.
 
     Pure on purpose: the bot had no way to show what it had indexed, and this
     formatting is the part worth testing without a Telegram server in the loop.
+
+    The quota line comes from the backend's own answer, the same rule the web
+    UI uses: a limit is visible before it is hit, and a limit of 0 (off) shows
+    only the usage.
     """
+    usage = describe_quota(quota)
+
     if not documents:
-        return f"You have no documents indexed. Send me a file ({SUPPORTED_LIST})."
+        message = f"You have no documents indexed. Send me a file ({SUPPORTED_LIST})."
+        return message + (f"\n<i>{html.escape(usage)}</i>" if usage else "")
 
     lines = [f"<b>Your documents ({len(documents)}):</b>"]
     for doc in documents:
@@ -166,6 +174,8 @@ def format_document_list(documents: list) -> str:
             pages = doc["pages"]
             detail += f", {pages} page{'s' if pages != 1 else ''}"
         lines.append(f"\n• <b>{name}</b>\n  <i>{detail}</i>")
+    if usage:
+        lines.append(f"\n\n<i>{html.escape(usage)}</i>")
     return "".join(lines)
 
 
@@ -327,8 +337,9 @@ async def documents_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 headers=BACKEND_HEADERS,
             )
             if response.status_code == 200:
+                body = response.json()
                 await update.message.reply_html(
-                    format_document_list(response.json()["documents"])
+                    format_document_list(body["documents"], body.get("quota"))
                 )
             else:
                 await update.message.reply_text(f"❌ {backend_error(response)}")
@@ -385,6 +396,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await status_msg.edit_text("ℹ️ This document is already indexed.")
                 else:
                     await status_msg.edit_text("✅ Document processed successfully!")
+            elif response.status_code == 413:
+                # Over quota. The backend's wording is client-neutral ("remove
+                # documents you no longer need"); this bot has no per-document
+                # delete, so say what the remedy is here.
+                await status_msg.edit_text(
+                    f"❌ {backend_error(response)}\n\n"
+                    "Use /documents to see what is indexed and /clear to remove it all."
+                )
             else:
                 await status_msg.edit_text(
                     f"❌ Failed to process document: {backend_error(response)}"

@@ -59,6 +59,8 @@ class FakeRequests:
                     "chunks": 3, "type": "docx",
                 }],
                 "total_chunks": 3,
+                "quota": {"documents": 1, "max_documents": 200,
+                          "bytes": 2048, "max_bytes": 1024 ** 3},
             })
         return FakeResponse({"status": "ok"})
 
@@ -298,3 +300,54 @@ def test_the_transport_patch_does_not_outlive_the_test():
     import requests
 
     assert requests.post.__module__.startswith("requests")
+
+
+# =========================
+# Quotas in the sidebar
+# =========================
+
+def test_the_limits_box_shows_the_real_usage(app):
+    """It used to promise "Any number of documents" and "TXT, PDF", both false."""
+    boxes = [i.value for i in app.info]
+
+    assert any("1 of 200 documents, 2 KB of 1 GB" in text for text in boxes), boxes
+    assert not any("Any number of documents" in text for text in boxes)
+    assert any("DOCX" in text for text in boxes), boxes
+
+
+def test_an_older_backend_without_a_quota_block_still_renders(monkeypatch):
+    import requests
+    from streamlit.testing.v1 import AppTest
+
+    fake = FakeRequests()
+
+    def old_listing(url, **kwargs):
+        if url.endswith("/documents"):
+            return FakeResponse({"documents": [], "total_chunks": 0})
+        return fake.get(url, **kwargs)
+
+    monkeypatch.setattr(requests, "get", old_listing)
+    monkeypatch.setattr(requests, "post", fake.post)
+    monkeypatch.setattr(requests, "delete", fake.delete)
+
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.run()
+
+    assert not at.exception, [str(e) for e in at.exception]
+
+
+def test_deleting_a_document_lets_a_refused_file_be_retried(app):
+    """The 413 message says to remove a document. Before this, the app remembered
+    the refusal and silently skipped the same file forever - the remedy worked on
+    the backend and failed in the UI."""
+    app.session_state["failed_files"] = {
+        ("big.pdf", "0123456789abcdef"): "Document limit reached: you hold 200 of 200."
+    }
+    app.run()
+    assert any("big.pdf" in e.value for e in app.error), "the refusal was not shown"
+
+    app.button(key="del_" + "a" * 16).click().run()
+
+    state = app.session_state
+    assert "failed_files" not in state or not state["failed_files"], "the refusal was kept"
+    assert not any("big.pdf" in e.value for e in app.error)

@@ -97,8 +97,16 @@ def test_upload_traversal_filename_stays_inside_upload_dir(api):
         # The stored name must be a plain basename with no traversal component.
         assert response.json()["filename"] == "evil.txt"
 
+    from app.activity import ACTIVITY_DIRNAME
+
     owner_dir = (api.upload_dir / "u1").resolve()
-    stored = [p for p in api.upload_dir.rglob("*") if p.is_file()]
+    # Everything under the upload dir except the activity markers, which are
+    # not uploads: the point is that a stored *upload* cannot land anywhere but
+    # in its owner's directory.
+    stored = [
+        p for p in api.upload_dir.rglob("*")
+        if p.is_file() and ACTIVITY_DIRNAME not in p.parts
+    ]
     assert stored, "sanitized file was not stored under the upload dir"
     for path in stored:
         assert path.resolve().parent == owner_dir, f"{path} escaped {owner_dir}"

@@ -100,6 +100,52 @@ def _no_real_network(_isolated_environment):
         socket.create_connection = real_create
 
 
+@pytest.fixture(autouse=True)
+def _release_chroma():
+    """Close every ChromaDB client the test built.
+
+    chromadb caches each client's System process-wide and never stops it, so
+    every app the suite builds left its SQLite connections open - one per
+    worker thread that touched the collection, about two file descriptors per
+    test. Nothing noticed until the suite passed ~800 tests and Windows answered
+    "Too many open files" in whichever test happened to run last. Found by
+    counting os.dup(0) after each test; this fixture is what made the count
+    flat again.
+    """
+    import warnings
+
+    from chromadb.api.client import SharedSystemClient
+
+    # Only what this test created: stopping a System a session-scoped fixture
+    # opened would break every later test that still holds it.
+    before = set(SharedSystemClient._identifer_to_system)
+    yield
+    registry = SharedSystemClient._identifer_to_system
+    mine = [key for key in registry if key not in before]
+    if not mine:
+        return  # this test built no app; nothing to release
+
+    failed = 0
+    for key in mine:
+        system = registry.pop(key, None)
+        try:
+            # stop() closes the SQLite connection pool; it is what actually
+            # frees the descriptors. A gc.collect() here did too, at about a
+            # second per test across the suite - stop() alone is enough.
+            system.stop()
+        except Exception:
+            failed += 1
+    if failed:
+        # Not swallowed: a stop() that starts failing brings the descriptor
+        # leak back, and the suite would only say so around test 800, as
+        # "Too many open files" in whatever ran last.
+        warnings.warn(
+            f"{failed} ChromaDB system(s) could not be stopped; "
+            "file descriptors are leaking",
+            stacklevel=1,
+        )
+
+
 def _fake_vector(text: str, dim: int = 32):
     seed = int(hashlib.sha256(text.encode("utf-8")).hexdigest()[:12], 16)
     rng = random.Random(seed)

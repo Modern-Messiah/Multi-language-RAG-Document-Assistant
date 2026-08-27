@@ -70,9 +70,24 @@ class DocumentSummary(BaseModel):
     pages: Optional[int] = None
 
 
+class QuotaUsage(BaseModel):
+    """Where this owner stands against the per-owner limits.
+
+    Returned with the listing so a limit is visible before it is hit; a quota
+    that only ever announces itself as a rejected upload feels like a fault.
+    A max of 0 means that limit is off.
+    """
+
+    documents: int
+    max_documents: int
+    bytes: int
+    max_bytes: int
+
+
 class DocumentListResponse(BaseModel):
     documents: List[DocumentSummary]
     total_chunks: int
+    quota: Optional[QuotaUsage] = None
 
 
 class DeleteResponse(BaseModel):
@@ -119,6 +134,70 @@ class FeedbackRequest(BaseModel):
 
 class FeedbackResponse(BaseModel):
     message: str
+
+
+class SweepEntry(BaseModel):
+    """One owner as the sweep sees it."""
+
+    user_id: str
+    documents: int
+    bytes: int
+    # ISO 8601 with offset, or null when nothing dates this owner.
+    last_seen: Optional[str] = None
+
+
+class OrphanEntry(BaseModel):
+    """Stored files with no vectors behind them, per owner.
+
+    Left by a crash between write and index, or by the /clear of an earlier
+    version that deleted vectors only. Invisible in /documents and undeletable
+    through the API, so the sweep is where they are reconciled.
+    """
+
+    user_id: str
+    files: int
+    bytes: int
+    # Whether this owner matches the sweep's prefix. Orphans are reported for
+    # every owner - they are most likely under the stable ids a web- prefix
+    # excludes - but removed only inside the prefix that was asked for.
+    in_scope: bool = True
+
+
+class SweepFailure(BaseModel):
+    user_id: str
+    error: str
+
+
+class SweepResponse(BaseModel):
+    """What a sweep found, and - with apply - what it did.
+
+    Every owner matching the prefix is in exactly one of candidates (idle, with
+    something to delete), empty (idle, nothing left but a marker), unknown
+    (nothing dates it, so never swept) or none of them, which means it is
+    active. `foreign` is names on disk that cannot be a user_id and are never
+    acted on. `refused` is set when apply was asked for and declined, with the
+    reason; nothing was deleted in that case.
+    """
+
+    idle_days: int
+    prefix: str
+    dry_run: bool
+    cutoff: str
+    # The most recent activity across EVERY owner, not only the prefix. When
+    # this is older than the cutoff, nobody has been seen at all - which after a
+    # restore or a long stop means the markers are stale, not that everyone
+    # left, and apply refuses without force.
+    newest_seen: Optional[str] = None
+    candidates: List[SweepEntry]
+    empty: List[SweepEntry]
+    unknown: List[str]
+    foreign: List[str]
+    orphans: List[OrphanEntry]
+    swept: List[str]
+    became_active: List[str]
+    failed: List[SweepFailure]
+    orphans_removed: int
+    refused: Optional[str] = None
 
 
 class ErrorResponse(BaseModel):
