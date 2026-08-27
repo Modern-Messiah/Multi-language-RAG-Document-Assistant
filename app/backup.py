@@ -34,6 +34,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.activity import ACTIVITY_DIRNAME
 from app.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -234,8 +235,15 @@ def create_backup(output_dir, settings=None, locations=None) -> dict:
                 counts["chunks"] = chunk_count(copied_db)
 
         if UPLOADS_MEMBER in present:
-            counts["uploads"] = _copy_tree(
-                present[UPLOADS_MEMBER], staging / UPLOADS_MEMBER
+            _copy_tree(present[UPLOADS_MEMBER], staging / UPLOADS_MEMBER)
+            # The activity markers live under the uploads directory and travel
+            # with it, but they are not uploads: an operator comparing this
+            # number before and after a restore is counting their files.
+            counts["uploads"] = sum(
+                1 for item in present[UPLOADS_MEMBER].rglob("*")
+                if item.is_file() and ACTIVITY_DIRNAME not in item.relative_to(
+                    present[UPLOADS_MEMBER]
+                ).parts
             )
 
         if FEEDBACK_MEMBER in present:
@@ -396,9 +404,13 @@ def restore_backup(archive, settings=None, locations=None,
             "Change the settings to match, or pass --force if you know better."
         )
 
+    # A directory holding only the activity markers is not data: the markers
+    # are about the owners, and the owners are what is being restored.
     occupied = [
         str(path) for name, path in locations.items()
-        if path.exists() and any(path.iterdir())
+        if path.exists() and any(
+            item.name != ACTIVITY_DIRNAME for item in path.iterdir()
+        )
     ]
     if occupied and not overwrite:
         raise BackupError(
@@ -421,6 +433,16 @@ def restore_backup(archive, settings=None, locations=None,
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(source), str(destination))
             restored[name] = str(destination)
+
+    # Restart the idle clock. The archive carries every activity marker with
+    # its original mtime, so restoring last month's snapshot would make every
+    # owner look a month idle by construction and the next sweep would list
+    # them all. Dating them now is the safe direction: a genuinely abandoned
+    # namespace lives idle_days longer, a live one is not deleted.
+    if UPLOADS_MEMBER in restored:
+        from app.activity import ActivityTracker
+
+        ActivityTracker(locations[UPLOADS_MEMBER]).reset_all()
 
     return {
         "restored": restored,

@@ -38,7 +38,11 @@ def test_listing_an_empty_namespace(api):
     """A tenant with nothing indexed is an empty list, not an error."""
     body = _documents(api, "nobody")
 
-    assert body == {"documents": [], "total_chunks": 0}
+    assert body["documents"] == []
+    assert body["total_chunks"] == 0
+    # The quota rides along so a limit is visible before it is hit.
+    assert body["quota"]["documents"] == 0
+    assert body["quota"]["bytes"] == 0
 
 
 def test_uploaded_document_appears_in_the_listing(api):

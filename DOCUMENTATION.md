@@ -293,6 +293,11 @@ Uploads and indexes a document.
     -   `400` - unsupported extension, empty file, no extractable text, a corrupt or
         unparseable document, or a file larger than `MAX_FILE_SIZE`.
     -   `401` - bad or missing `X-API-Key`.
+    -   `413` - this upload would take the owner past `MAX_DOCUMENTS_PER_USER` or
+        `MAX_BYTES_PER_USER`. The detail carries the numbers and the remedy. An
+        identical re-upload still succeeds at the limit (it adds nothing), and a new
+        revision of an existing filename is judged after the old revision is
+        discounted (it replaces it). See Quotas and retention.
     -   `422` - missing or malformed `user_id`.
     -   `503` - the vector store rejected the write (retryable).
 
@@ -352,9 +357,14 @@ Lists what this `user_id` has indexed, one entry per document rather than per ch
     ```json
     {"documents": [{"file_hash": "a1b2c3d4e5f60718", "source": "report.pdf",
                     "chunks": 15, "type": "pdf", "pages": 4}],
-     "total_chunks": 15}
+     "total_chunks": 15,
+     "quota": {"documents": 1, "max_documents": 200,
+               "bytes": 348160, "max_bytes": 1073741824}}
     ```
     Sorted by filename, case-insensitively. `pages` is `null` for text files.
+    `quota` is where this owner stands against the per-owner limits, so a limit is
+    visible before it is hit; a max of `0` means that limit is off. `bytes` counts
+    only files that back a listed document.
 -   **Errors**: `401`, `422`, `503` (vector store unavailable).
 
 ### `DELETE /documents/{file_hash}`
@@ -385,11 +395,121 @@ Records one rating of one answer. Requires `FEEDBACK_ENABLED`.
     API stays stateless and a replica that did not serve the query can still
     take the rating.
 
+### `POST /maintenance/sweep`
+Finds namespaces nobody has touched in `idle_days` and, when asked twice, removes
+them. Runs inside the backend because ChromaDB must have a single writer - the same
+reason backup and restore insist the backend is stopped. Meant to be called by
+`python -m scripts.sweep`.
+-   **Query Parameters**: `idle_days` (**required**, `1`-`3650`), `prefix`
+    (**required**; the empty string means every owner, and has to be written into
+    the request on purpose), `apply` (default `false` = dry run), `force` (default
+    `false`).
+-   **Response**: `200` with
+    ```json
+    {"idle_days": 30, "prefix": "web-", "dry_run": true,
+     "cutoff": "2026-07-27T12:00:00+00:00", "newest_seen": "2026-08-26T09:14:02+00:00",
+     "candidates": [{"user_id": "web-3f1c...", "documents": 2, "bytes": 51200,
+                     "last_seen": "2026-06-30T08:00:00+00:00"}],
+     "empty": [], "unknown": [], "foreign": ["tmp restore"],
+     "orphans": [{"user_id": "12345", "files": 1, "bytes": 4096, "in_scope": false}],
+     "swept": [], "became_active": [], "failed": [], "orphans_removed": 0,
+     "refused": null}
+    ```
+    Every owner **matching the prefix** is in exactly one of `candidates` (idle,
+    with something to delete), `empty` (idle, only a marker or an empty directory
+    left), `unknown` (nothing dates it - never swept) or not listed at all, which
+    means it is active. `foreign` is
+    names on disk that cannot be a `user_id` and are never acted on. `orphans` is
+    stored files with no vectors behind them, per owner: reported for **every**
+    owner, since they are most likely under the stable ids a `web-` prefix
+    excludes, but removed on apply only for owners inside the prefix - `in_scope`
+    says which. An operator who asked to sweep web sessions should not have files
+    deleted elsewhere.
+-   **Refusals**: with `apply=true` and no `force`, the sweep declines - `200`,
+    `dry_run: true`, `refused` set to the reason, nothing deleted - when the
+    prefix is empty, when `idle_days` is below 7, when activity writes have failed
+    since startup, or when no owner at all has been seen inside the window (after a
+    restore or a long stop that is stale data, not a mass departure).
+-   **Errors**: `401`, `422`, `503` (vector store unavailable).
+
 ### `POST /clear`
 Deletes the caller's documents: both the vectors **and** the raw uploaded files on disk.
 -   **Query Parameters**: `user_id` (**required**).
 -   **Response**: `{"message": "Documents cleared successfully"}`
 -   **Errors**: `401`, `422`, `500` (deletion failed).
+
+## Quotas and retention
+
+Until Stage 15 the only bound was `MAX_FILE_SIZE`, on one file. One `user_id` could
+fill the volume the vector store lives on, and every upload was paid embedding calls
+with no ceiling.
+
+**Per-owner limits.** `MAX_DOCUMENTS_PER_USER` (200) and `MAX_BYTES_PER_USER` (1 GiB)
+bound what one owner may hold. An upload that would cross either is refused with
+`413` and a message naming the numbers and the remedy. They ship on - unlike
+`RELEVANCE_THRESHOLD` and `MMR_LAMBDA`, which ship off - because of how they fail: a
+wrong threshold silently drops relevant context, an exceeded quota is loud. `0`
+disables a limit (unlike `MAX_FILE_SIZE`, where `0` is rejected). The check happens
+after deduplication, so an identical re-upload succeeds at the limit, and a new
+revision of an existing filename is judged with the old revision discounted. Bytes
+are counted only for files that back a listed document; a file with no vectors
+behind it is invisible in `/documents` and cannot be deleted through the API, so
+counting it would present a limit there is no way to get under.
+
+Both clients show the usage line from `GET /documents` (`3 of 200 documents, 12 KB
+of 1 GB`; with a limit off, just the usage). The message names no setting - that
+goes to the backend log at WARNING, where the person who can change it is reading.
+
+Uploads from one owner are serialized in-process: the quota check is a read
+followed by a write, and two uploads arriving together would both read "room for
+one more". The lock is striped (64 stripes), because the web UI mints a new owner
+per browser session and a lock per `user_id` would grow for as long as the process
+lived. The guarantee is per process, which the single-writer ChromaDB constraint
+already makes the only deployment shape.
+
+Quotas are keyed on `user_id`, which is unauthenticated client input. They protect
+against accidents and runaway cost, not abuse: anyone holding the shared key can
+pick another `user_id`.
+
+**Activity.** Each owner has a marker file under `UPLOAD_DIR/.activity/`, touched by
+a successful upload, question, listing (of a non-empty namespace), delete or rating.
+`last_seen` is the newer of the marker and the owner's newest uploaded file, so
+an upload in flight cannot be mistaken for idleness. Owners
+from before markers existed are seeded at startup, so "idle" means "idle since the
+upgrade" - dating them by their newest upload would be a lower bound on activity,
+and a lower bound can only make a live owner look more idle than they are. Markers
+travel with backups; a restore dates them all now, since restoring last month's
+snapshot would otherwise make everyone look a month idle by construction.
+
+**The sweep.** The web UI's `web-<uuid>` namespaces are orphaned the moment a tab
+closes and can never be reached again - and since Stage 14 they are copied into
+every backup. `python -m scripts.sweep` lists namespaces idle for 30+ days under the
+`web-` prefix; `--apply` removes them. Telegram ids are digit-only, so that prefix
+can never match a Telegram user; sweeping every tenant needs an explicit
+`--prefix ""` and, on the backend, `force`.
+
+```bash
+python -m scripts.sweep                          # dry run
+python -m scripts.sweep --apply                  # remove idle web sessions
+docker compose run --rm bot python -m scripts.sweep --apply
+```
+
+In Compose the sweep runs from the `bot` service: it needs the backend up (unlike
+backup and restore), and the bot carries `BACKEND_URL=http://backend:8000` and the
+API key. A one-off `backend` container would ask `localhost` and find nobody.
+
+Everything about the sweep is arranged around the one mistake it can make. Dry run
+is the default. An owner nothing dates is reported as unknown and never removed.
+`apply` refuses on its own - and says why - without a prefix, below 7 idle days,
+after any failed activity write since startup, and when no owner at all has been
+seen inside the window. Each deletion is logged before it happens, so a crash
+mid-loop leaves a record; each owner is re-checked under its upload lock right before
+removal, so one who came back while the list was being built is spared; one failure
+is recorded and the loop goes on. Orphan files - stored files with no vectors behind
+them - are reported for every owner and removed on apply only inside the prefix,
+under the same lock; the script says how many it is leaving alone.
+
+There is no automatic schedule: run it from cron, and read a dry run first.
 
 ## Backup and restore
 
@@ -613,12 +733,16 @@ holds it can pass any `user_id` and read or clear that namespace. Treat the API 
 trusted-network infrastructure: keep it on loopback or a private network (as the shipped
 Compose file does) and treat the separation as *tenant scoping between cooperating
 clients*, not as security between mutually distrusting users. Per-user authentication is
-future work.
+future work. The same applies to the per-owner quotas (accidents and runaway cost, not
+abuse) and to `POST /maintenance/sweep`, which lets a key holder list idle tenants and
+remove many at once: `/clear` already allowed removing any tenant with the key, so this
+does not widen the boundary, but it does make enumeration easier.
 
 Client-side identities:
 - **Streamlit** mints a fresh per-session id `web-<uuid4-hex>`. Reloading the page starts
   an empty namespace; documents uploaded earlier stay on the backend but are no longer
-  reachable from the UI.
+  reachable from the UI. The sweep (see Quotas and retention) is how those are
+  eventually removed.
 - **Telegram bot** uses the Telegram user id, which is stable across sessions.
 
 ## Configuration
@@ -647,6 +771,8 @@ variable of the same name, read from `.env` or the process environment.
 | `COLLECTION_NAME` | ChromaDB collection name. | `documents` |
 | `UPLOAD_DIR` | Where raw uploads are stored. | `data/uploads` |
 | `MAX_FILE_SIZE` | Maximum accepted upload, in bytes. | `31457280` (30 MB) |
+| `MAX_DOCUMENTS_PER_USER` | Documents one owner may hold. An upload past it is a `413`. `0` = unlimited. | `200` |
+| `MAX_BYTES_PER_USER` | Bytes of uploaded files one owner may hold. `0` = unlimited. | `1073741824` (1 GiB) |
 | `FEEDBACK_ENABLED` | Whether answers can be rated. Off makes `POST /feedback` answer 404 and creates nothing on disk. | `True` |
 | `FEEDBACK_DIR` | Where `feedback.jsonl` is written. | `data/feedback` |
 | `FEEDBACK_MAX_BYTES` | Cap on that file. At the cap new ratings are refused with 507 instead of filling the volume. | `10485760` (10 MB) |
@@ -818,6 +944,8 @@ subsequent search. To switch models, delete the collection directory
 │   ├── observability.py        # Request ids, access log, readiness checks
 │   ├── feedback.py             # The rating log and the reports read off it
 │   ├── backup.py               # Snapshot and restore, with a verified manifest
+│   ├── activity.py             # Who was here when: the markers the sweep reads
+│   ├── humanize.py             # human_size and the quota line, shared with the clients
 │   ├── models/                 # Pydantic models (QueryRequest, QueryResponse)
 │   ├── rag/                    # RAG core logic
 │   │   ├── languages.py        # The one language table both clients derive from
@@ -840,7 +968,7 @@ subsequent search. To switch models, delete the collection directory
 │   ├── test_embeddings.py      # Vector store operations
 │   └── test_upload_errors.py   # Upload failure modes
 ├── evaluation/                 # Retrieval metrics, golden set, eval and feedback scripts
-├── scripts/                    # Operator tooling: backup.py, restore.py (ships in the image)
+├── scripts/                    # Operator tooling: backup.py, restore.py, sweep.py (ships in the image)
 ├── .github/workflows/ci.yml    # Lint + tests + docker build
 ├── data/
 │   ├── backups/                # Archives written by scripts/backup.py (git-ignored)

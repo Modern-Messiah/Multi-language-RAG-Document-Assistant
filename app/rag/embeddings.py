@@ -521,6 +521,25 @@ class EmbeddingsManager:
 
         return sorted(documents.values(), key=lambda d: d["source"].lower())
 
+    def list_owners(self) -> List[str]:
+        """Every user_id that has at least one chunk, sorted.
+
+        A full metadata scan of the collection - the one lookup in this class
+        that is deliberately NOT owner-scoped, because its job is to find the
+        owners. Acceptable for a maintenance call; not something a request
+        handler should do.
+        """
+        if self.collection is None:
+            return []
+
+        results = self.collection.get(include=["metadatas"])
+        owners = set()
+        for metadata in results.get("metadatas") or []:
+            owner = (metadata or {}).get("user_id")
+            if owner:
+                owners.add(str(owner))
+        return sorted(owners)
+
     def delete_by_file_hash(self, file_hash: str, owner: str) -> int:
         """Delete one document's chunks. Returns how many were removed.
 

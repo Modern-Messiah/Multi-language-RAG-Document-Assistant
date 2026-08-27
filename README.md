@@ -30,6 +30,11 @@ ChromaDB vector store, OpenAI embeddings and chat.
   so a complaint becomes a case the evaluation harness can measure instead of a
   story. `python -m evaluation.from_feedback` turns the collected ones into
   golden-case stubs.
+- **Bounded Growth**: per-owner limits on documents and bytes, shown in both
+  clients before they are hit and refused loudly when they are. An idle-namespace
+  sweep (`python -m scripts.sweep`) removes the web UI's abandoned per-session
+  namespaces; it is a dry run unless told otherwise and refuses on its own where
+  its data is likely stale.
 - **Backup and Restore**: `python -m scripts.backup` writes one verified
   archive of the index, the uploads and the ratings; `python -m scripts.restore`
   puts it back and refuses an archive that does not fit the deployment. The test
