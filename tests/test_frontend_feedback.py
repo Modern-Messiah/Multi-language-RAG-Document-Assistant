@@ -472,3 +472,28 @@ def test_the_picker_offers_every_provider_the_backend_knows(app):
     options = [s.options for s in app.selectbox]
 
     assert any(list(PROVIDERS) == list(o) for o in options), options
+
+
+def test_the_key_box_is_the_second_thing_in_the_sidebar(app):
+    """It used to sit last, under a document list that grows with every upload,
+    so it was findable only by scrolling the whole panel."""
+    labels = [e.label for e in app.expander]
+
+    assert labels and "own API key" in labels[0], labels
+
+
+def test_someone_who_has_not_set_a_key_is_told_where_to(app):
+    """The main pane says it, so the answer does not depend on opening a
+    panel the person did not know was there."""
+    captions = " ".join(c.value for c in app.caption)
+
+    assert "open **🔑 Answer on my own API key** in the sidebar" in captions
+
+
+def test_the_box_is_open_when_a_key_is_already_set(app):
+    """Folded away costs nothing to someone who does not want it; folded away
+    over a key they did set would hide the thing they came back to change."""
+    app.session_state["own_key"] = OWN_KEY
+    app.run()
+
+    assert any(e.proto.expanded for e in app.expander if "own API key" in e.label)
