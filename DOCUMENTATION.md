@@ -517,9 +517,14 @@ work out. Without a caller's key, an upstream failure keeps its old meaning -
 
 In the clients:
 
-- **Streamlit**: a password field, a provider picker and a model box in the
-  sidebar. All live in session state, so they go when the tab does, and the
-  caption says so.
+- **Streamlit**: "🔑 Answer on my own API key" in the sidebar, directly under
+  the uploader - a password field, a provider picker and a model box. Folded
+  away until it holds a key, so it costs nothing to anyone who does not want
+  it, and open when it does, since that is what someone came back to change.
+  All three live in session state, so they go when the tab does. The main pane
+  says which model is answering, or where to set one: the section used to sit
+  last in the sidebar, under a document list that grows with every upload, and
+  was findable only by scrolling the whole panel.
 - **Telegram**: `/model <model> <your api key>`, or
   `/model <provider> <model> <your api key>` to name one; `/model` shows what is
   set and which providers are on offer, without ever repeating the key back;

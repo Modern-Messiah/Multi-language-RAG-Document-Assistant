@@ -191,6 +191,13 @@ if "user_id" not in st.session_state:
     st.session_state["user_id"] = f"web-{uuid.uuid4().hex}"
 USER_ID = st.session_state["user_id"]
 
+# Seeded before the sidebar draws, because the "own model" widgets are read
+# elsewhere on the page too - the caption above the chat says which model is
+# answering, and asking_headers builds a question's headers from them.
+st.session_state.setdefault("own_key", "")
+st.session_state.setdefault("own_model", "")
+st.session_state.setdefault("own_provider", DEFAULT_PROVIDER)
+
 # =========================
 # Sidebar
 # =========================
@@ -264,6 +271,36 @@ with st.sidebar:
     # only in the run that produced them.
     for (name, _digest), reason in failed_files.items():
         st.error(f"{name}: {reason}")
+
+    st.divider()
+
+    # =========================
+    # Your own model
+    # =========================
+    with st.expander("🔑 Answer on my own API key", expanded=bool(
+        st.session_state.get("own_key")
+    )):
+        st.caption(
+            "Optional. Give your own API key and answers come from it, with "
+            "the model you name. The key is never stored: it lives in this "
+            "browser session and goes when the tab does."
+        )
+        st.text_input(
+            "API key", type="password", key="own_key", placeholder="sk-...",
+            help="Answers only - indexing stays on the operator's key.",
+        )
+        st.selectbox(
+            "Provider", PROVIDER_NAMES, key="own_provider",
+            help="Whose API the key belongs to. All of them speak the same "
+                 "protocol.",
+            disabled=not st.session_state["own_key"],
+        )
+        st.text_input(
+            "Model", key="own_model", placeholder="gpt-4o",
+            help="Any model your key can reach at that provider. Empty means "
+                 "the assistant's own.",
+            disabled=not st.session_state["own_key"],
+        )
 
     st.divider()
 
@@ -388,38 +425,6 @@ with st.sidebar:
     # was how "Any number of documents" stood here after quotas shipped.
     st.divider()
 
-    # =========================
-    # Your own model
-    # =========================
-    st.header("🔑 Your own model")
-    st.caption(
-        "Optional. Give your own API key and answers come from it, with the "
-        "model you name. The key is never stored: it lives in this browser "
-        "session and goes when the tab does."
-    )
-    st.session_state.setdefault("own_key", "")
-    st.session_state.setdefault("own_model", "")
-    st.session_state.setdefault("own_provider", DEFAULT_PROVIDER)
-    st.text_input(
-        "API key", type="password", key="own_key", placeholder="sk-...",
-        help="Answers only - indexing stays on the operator's key.",
-    )
-    st.selectbox(
-        "Provider", PROVIDER_NAMES, key="own_provider",
-        help="Whose API the key belongs to. All of them speak the same protocol.",
-        disabled=not st.session_state["own_key"],
-    )
-    st.text_input(
-        "Model", key="own_model", placeholder="gpt-4o",
-        help="Any model your key can reach at that provider. Empty means the "
-             "assistant's own.",
-        disabled=not st.session_state["own_key"],
-    )
-    if st.session_state["own_key"]:
-        chosen = st.session_state["own_model"] or "the assistant's model"
-        where = st.session_state.get("own_provider", DEFAULT_PROVIDER)
-        st.caption(f"Answers come from **{chosen}** at **{where}**, on your key.")
-
     limits = [f"Up to **{MAX_FILE_MB} MB per file**"]
     if quota_line:
         limits.insert(0, f"You hold **{quota_line}**")
@@ -440,6 +445,19 @@ if indexed_documents:
     st.success(f"📚 {count} document{'s' if count != 1 else ''} indexed")
 else:
     st.warning("No documents indexed yet")
+
+# Who is answering, said out here rather than in the sidebar: someone who has
+# handed over an API key should be able to see it is being used without opening
+# a panel, and someone who has not should be able to find out where to.
+if st.session_state.get("own_key"):
+    chosen = st.session_state.get("own_model") or "the assistant's model"
+    where = st.session_state.get("own_provider", DEFAULT_PROVIDER)
+    st.caption(f"🔑 Answers come from **{chosen}** at **{where}**, on your key.")
+else:
+    st.caption(
+        "Answers come from the assistant's own model. To use your own API key "
+        "and model, open **🔑 Answer on my own API key** in the sidebar."
+    )
 
 # =========================
 # Conversation
