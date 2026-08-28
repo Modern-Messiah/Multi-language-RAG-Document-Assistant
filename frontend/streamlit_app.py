@@ -20,6 +20,8 @@ from app.rag.document_loader import (  # noqa: E402  (must follow the sys.path f
 from clients.backend import (  # noqa: E402
     KEY_HEADER,
     MODEL_HEADER,
+    PROVIDER_HEADER,
+    PROVIDERS,
     REQUEST_ID_HEADER,
     SUPPORTED_LANGUAGES,
     api_headers,
@@ -60,6 +62,11 @@ UPLOAD_LABEL = " or ".join(
 # disabled (development mode) and the header is simply ignored.
 HEADERS = api_headers()
 
+# The provider list comes from the backend's own table, so the picker cannot
+# offer somewhere the API would refuse to talk to.
+PROVIDER_NAMES = list(PROVIDERS)
+DEFAULT_PROVIDER = "openai"
+
 
 def asking_headers() -> dict:
     """The shared secret, plus this session's own key and model if it gave any.
@@ -74,6 +81,9 @@ def asking_headers() -> dict:
         model = st.session_state.get("own_model", "").strip()
         if model:
             headers[MODEL_HEADER] = model
+        provider = st.session_state.get("own_provider", "")
+        if provider and provider != DEFAULT_PROVIDER:
+            headers[PROVIDER_HEADER] = provider
     return headers
 
 
@@ -389,18 +399,26 @@ with st.sidebar:
     )
     st.session_state.setdefault("own_key", "")
     st.session_state.setdefault("own_model", "")
+    st.session_state.setdefault("own_provider", DEFAULT_PROVIDER)
     st.text_input(
         "API key", type="password", key="own_key", placeholder="sk-...",
         help="Answers only - indexing stays on the operator's key.",
     )
+    st.selectbox(
+        "Provider", PROVIDER_NAMES, key="own_provider",
+        help="Whose API the key belongs to. All of them speak the same protocol.",
+        disabled=not st.session_state["own_key"],
+    )
     st.text_input(
         "Model", key="own_model", placeholder="gpt-4o",
-        help="Any model your key can reach. Empty means the assistant's own.",
+        help="Any model your key can reach at that provider. Empty means the "
+             "assistant's own.",
         disabled=not st.session_state["own_key"],
     )
     if st.session_state["own_key"]:
         chosen = st.session_state["own_model"] or "the assistant's model"
-        st.caption(f"Answers come from **{chosen}** on your key.")
+        where = st.session_state.get("own_provider", DEFAULT_PROVIDER)
+        st.caption(f"Answers come from **{chosen}** at **{where}**, on your key.")
 
     limits = [f"Up to **{MAX_FILE_MB} MB per file**"]
     if quota_line:

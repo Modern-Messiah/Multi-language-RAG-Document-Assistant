@@ -476,14 +476,14 @@ def _remove_stored_file(settings: Settings, user_id: str, file_hash: str) -> Non
 
 
 def _caller_model(request: Request) -> tuple:
-    """The key and model this caller asked to answer with, if any.
+    """The key, model and provider this caller asked to answer with, if any.
 
-    A malformed pair is a 400 rather than a silent fall back to the operator's
+    A malformed set is a 400 rather than a silent fall back to the operator's
     key: someone who sent a key meant to use it, and quietly spending the
     operator's money instead is the one outcome nobody asked for.
     """
     try:
-        return byok.wanted(request.headers)
+        return byok.wanted(request.headers, request.app.state.settings)
     except byok.BringYourOwnKeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -610,8 +610,8 @@ def _quota_usage(state, settings: Settings, user_id: str) -> QuotaUsage:
 @router.post("/query", response_model=QueryResponse)
 def query_rag(request: Request, payload: QueryRequest):
     settings: Settings = request.app.state.settings
-    key, model = _caller_model(request)
-    client = byok.client_for(key, settings) if key else None
+    key, model, provider = _caller_model(request)
+    client = byok.client_for(key, settings, provider) if key else None
 
     try:
         answer = request.app.state.rag_chain.ask(
@@ -726,8 +726,8 @@ def query_rag_stream(request: Request, payload: QueryRequest):
     of a stream whose headers already said 200.
     """
     settings: Settings = request.app.state.settings
-    key, model = _caller_model(request)
-    client = byok.client_for(key, settings) if key else None
+    key, model, provider = _caller_model(request)
+    client = byok.client_for(key, settings, provider) if key else None
 
     stream = request.app.state.rag_chain.ask_stream(
         question=payload.question,

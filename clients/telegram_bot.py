@@ -26,6 +26,8 @@ from clients.backend import (
     AUTO_LANGUAGE,
     KEY_HEADER,
     MODEL_HEADER,
+    PROVIDER_HEADER,
+    PROVIDERS,
     REQUEST_ID_HEADER,
     SUPPORTED_LANGUAGES,
     api_headers,
@@ -315,6 +317,9 @@ def asking_headers(context) -> dict:
         model = context.user_data.get("own_model")
         if model:
             headers[MODEL_HEADER] = model
+        provider = context.user_data.get("own_provider")
+        if provider:
+            headers[PROVIDER_HEADER] = provider
     return headers
 
 
@@ -332,34 +337,50 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not parts:
         held = "yes" if context.user_data.get("own_key") else "no"
         model = context.user_data.get("own_model") or "the assistant's own"
+        where = context.user_data.get("own_provider") or "the assistant's own"
         await update.message.reply_text(
-            f"Your own key: {held}\nModel: {model}\n\n"
+            f"Your own key: {held}\nProvider: {where}\nModel: {model}\n\n"
             "To answer on your own account:\n"
             "  /model <model> <your api key>\n"
-            "  /model reset - forget both\n\n"
+            "  /model <provider> <model> <your api key>\n"
+            "  /model reset - forget all three\n\n"
+            f"Providers: {', '.join(PROVIDERS)}\n\n"
             "The key is never stored on the server. It is held in this chat's "
             "memory only, and is gone when the bot restarts."
         )
         return
 
     if parts[0] == "reset":
-        context.user_data.pop("own_key", None)
-        context.user_data.pop("own_model", None)
+        for remembered in ("own_key", "own_model", "own_provider"):
+            context.user_data.pop(remembered, None)
         await update.message.reply_text(
             "Forgotten. Answers come from the assistant's own model again."
         )
         return
 
+    # Three words means a provider was named. The provider list is a closed
+    # set, so "gemini gemini-2.0-flash <key>" cannot be mistaken for a model
+    # called "gemini".
+    provider = None
+    if len(parts) >= 3 and parts[0].lower() in PROVIDERS:
+        provider, parts = parts[0].lower(), parts[1:]
+
     if len(parts) < 2:
         await update.message.reply_text(
-            "A model needs your own API key with it: /model <model> <your api "
-            "key>. Choosing a model on someone else's account is not on offer."
+            "A model needs your own API key with it:\n"
+            "  /model <model> <your api key>\n"
+            "  /model <provider> <model> <your api key>\n"
+            f"Providers: {', '.join(PROVIDERS)}"
         )
         return
 
     model, key = parts[0], parts[1]
     context.user_data["own_model"] = model
     context.user_data["own_key"] = key
+    if provider:
+        context.user_data["own_provider"] = provider
+    else:
+        context.user_data.pop("own_provider", None)
 
     deleted = True
     try:
@@ -374,8 +395,9 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else "<b>I could not delete your message - delete it yourself, it has "
              "your key in it.</b>"
     )
+    at = f" at <b>{html.escape(provider)}</b>" if provider else ""
     await update.message.chat.send_message(
-        f"Answers now come from <b>{html.escape(model)}</b> on your key.\n"
+        f"Answers now come from <b>{html.escape(model)}</b>{at} on your key.\n"
         f"{warning}\n"
         "The key is never stored on the server, and is gone when the bot "
         "restarts.",

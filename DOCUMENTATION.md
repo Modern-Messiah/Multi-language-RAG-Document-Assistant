@@ -479,13 +479,36 @@ key would also be one that anyone holding the shared secret could spend.
 that rule, naming a model is a way to spend the operator's money on a costlier
 one than they configured.
 
-**The base URL is not negotiable.** `OPENAI_BASE_URL` stays the deployment's.
-Letting a caller name the endpoint would make the backend fetch whatever URL it
-is handed, internal addresses included.
+**The endpoint is chosen from a list, never supplied.** A caller names a
+provider and the URL comes from a table the backend owns:
+
+| `X-Model-Provider` | Endpoint | A bad key answers |
+| --- | --- | --- |
+| `openai` (default) | this deployment's `OPENAI_BASE_URL`, or api.openai.com | `401` |
+| `anthropic` | `https://api.anthropic.com/v1/` | `401` |
+| `gemini` | `https://generativelanguage.googleapis.com/v1beta/openai/` | `400` |
+| `deepseek` | `https://api.deepseek.com/v1` | `401` |
+| `kimi` | `https://api.moonshot.ai/v1` | `401` |
+| `kimi-cn` | `https://api.moonshot.cn/v1` | `401` |
+
+All of them answer OpenAI's chat completions protocol, which is why one client
+library reaches every one; the endpoints and that last column were checked by
+asking each provider with a deliberately invalid key. Letting a caller pass the
+URL itself would make the backend fetch whatever it is handed, internal
+addresses included - which is why this is a name and not an address, and why
+`ALLOWED_MODEL_PROVIDERS` lets an operator narrow the list.
+
+Naming a provider needs a key, like naming a model. `openai` means the
+deployment's own endpoint, so a deployment already pointed at a gateway
+(OpenRouter, LiteLLM, vLLM, Azure) keeps working and its users can reach
+anything that gateway offers.
 
 **When the provider refuses**, the caller hears about it rather than the
 operator: `400` with what happened - a rejected key, a model their key cannot
-reach, their own quota. This is the one place a `401` upstream is *not* an
+reach, their own quota, an empty balance (DeepSeek answers `402`), or any other
+status the provider chose. That last catch-all is not tidiness: providers
+disagree about what a bad key is, and Gemini's `400` used to fall through to
+"Query failed", which blamed the operator for the caller's typo. This is the one place a `401` upstream is *not* an
 operator problem, and both clients hide `401`/`403` behind "contact the
 operator", so it must not travel that path. The provider's own wording is not
 passed through: it can carry account details and says nothing the caller cannot
@@ -494,10 +517,13 @@ work out. Without a caller's key, an upstream failure keeps its old meaning -
 
 In the clients:
 
-- **Streamlit**: a password field and a model box in the sidebar. Both live in
-  session state, so they go when the tab does, and the caption says so.
-- **Telegram**: `/model <model> <your api key>` sets them, `/model` shows what
-  is set without ever repeating the key back, `/model reset` forgets. The
+- **Streamlit**: a password field, a provider picker and a model box in the
+  sidebar. All live in session state, so they go when the tab does, and the
+  caption says so.
+- **Telegram**: `/model <model> <your api key>`, or
+  `/model <provider> <model> <your api key>` to name one; `/model` shows what is
+  set and which providers are on offer, without ever repeating the key back;
+  `/model reset` forgets. The
   message carrying the key is deleted immediately - it would otherwise sit in
   the chat history on the device and on Telegram's servers - and if the bot
   cannot delete it (no permission in a group) it says so rather than leaving the
@@ -831,6 +857,7 @@ variable of the same name, read from `.env` or the process environment.
 | `OPENAI_TIMEOUT` | Seconds the OpenAI client waits. Keep it below the clients' own timeouts. | `45.0` |
 | `OPENAI_MAX_RETRIES` | Retries the OpenAI client makes on a transient failure. | `2` |
 | `OPENAI_BASE_URL` | Azure or an OpenAI-compatible endpoint (vLLM, Ollama). Empty means api.openai.com. | `""` |
+| `ALLOWED_MODEL_PROVIDERS` | Providers a caller may name with their own key, comma separated. Empty means all of them. | `""` |
 | `CHUNK_SIZE` | Characters per chunk, `>= 1`. | `1000` |
 | `CHUNK_OVERLAP` | Overlap between chunks; must be **smaller** than `CHUNK_SIZE`. | `200` |
 | `CHROMA_PERSIST_DIR` | ChromaDB storage directory. | `./data/chroma_db` |
