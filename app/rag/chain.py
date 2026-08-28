@@ -160,7 +160,7 @@ class RAGChain:
     # =========================
     # Cost accounting
     # =========================
-    def _log_usage(self, response, user_id: str) -> None:
+    def _log_usage(self, response, user_id: str, model: str = None) -> None:
         """Record what the answer cost, and whether the cap truncated it.
 
         Nothing measured spend per tenant before: response.usage was read off
@@ -176,7 +176,7 @@ class RAGChain:
             "chat completion user_id=%s model=%s prompt_tokens=%s "
             "completion_tokens=%s total_tokens=%s finish_reason=%s",
             user_id,
-            self.model,
+            model or self.model,
             getattr(usage, "prompt_tokens", None),
             getattr(usage, "completion_tokens", None),
             getattr(usage, "total_tokens", None),
@@ -374,7 +374,7 @@ class RAGChain:
             return entry.get("question", ""), entry.get("answer", "")
         return getattr(entry, "question", ""), getattr(entry, "answer", "")
 
-    def _condense(self, question: str, history) -> str:
+    def _condense(self, question: str, history, client=None, model=None) -> str:
         """Rewrite a follow-up so it can stand on its own.
 
         "And the second one?" embeds to nothing useful: retrieval matched the
@@ -401,8 +401,8 @@ class RAGChain:
         )
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
+            response = (client or self.client).chat.completions.create(
+                model=model or self.model,
                 messages=[
                     {"role": "system", "content": instruction},
                     {
@@ -455,7 +455,7 @@ class RAGChain:
 
         return sources
 
-    def _prepare(self, question, language, user_id, history):
+    def _prepare(self, question, language, user_id, history, client=None, model=None):
         """Retrieve and build the chat request.
 
         Shared by ask() and ask_stream() so the two cannot drift: a prompt
@@ -472,8 +472,11 @@ class RAGChain:
 
         filter_dict = {"user_id": user_id}
 
-        # Retrieve on the standalone form, answer the question as asked.
-        search_query = self._condense(question, history)
+        # Retrieve on the standalone form, answer the question as asked. The
+        # condensing call goes on the caller's key too: it is their question
+        # being rewritten, and billing half an exchange to each side would be
+        # the strangest possible split.
+        search_query = self._condense(question, history, client, model)
         docs = self._retrieve(search_query, filter_dict)
 
         if not docs:
@@ -503,7 +506,7 @@ Answer:
 """
 
         request = {
-            "model": self.model,
+            "model": model or self.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -524,20 +527,31 @@ Answer:
         language: str = AUTO_LANGUAGE,
         user_id: str = None,
         history=None,
+        client=None,
+        model=None,
     ) -> Dict:
-        request, sources = self._prepare(question, language, user_id, history)
+        """Answer one question.
+
+        `client` and `model` let a caller answer on their own API key with the
+        model they chose; the chain's own are used when they are not given. The
+        chain never keeps them - see app/byok.py for why.
+        """
+        request, sources = self._prepare(
+            question, language, user_id, history, client, model
+        )
 
         if request is None:
-            return {"answer": NO_CONTEXT_ANSWER, "sources": []}
+            return {"answer": NO_CONTEXT_ANSWER, "sources": [], "model": None}
 
-        response = self.client.chat.completions.create(**request)
-        self._log_usage(response, user_id)
+        response = (client or self.client).chat.completions.create(**request)
+        self._log_usage(response, user_id, model)
 
         raw_answer = (response.choices[0].message.content or "").strip()
 
         return {
             "answer": self._strip_citations(raw_answer),
             "sources": sources,
+            "model": request["model"],
         }
 
     # =========================
@@ -549,6 +563,8 @@ Answer:
         language: str = AUTO_LANGUAGE,
         user_id: str = None,
         history=None,
+        client=None,
+        model=None,
     ):
         """Yield the answer as it is generated.
 
@@ -563,17 +579,29 @@ Answer:
             {"type": "token", "text": "..."}
             {"type": "done"}
         """
-        request, sources = self._prepare(question, language, user_id, history)
-
-        yield {"type": "sources", "sources": sources}
+        request, sources = self._prepare(
+            question, language, user_id, history, client, model
+        )
 
         if request is None:
+            yield {"type": "sources", "sources": sources}
             yield {"type": "token", "text": NO_CONTEXT_ANSWER}
             yield {"type": "done"}
             return
 
+        # The completion is opened BEFORE the first event. create() returns
+        # once the response headers arrive, so an upstream refusal - a rejected
+        # key above all, which is the commonest mistake when a caller brings
+        # their own - raises while the handler is still priming this generator
+        # and can answer with a real status code. Yielding sources first
+        # committed a 200 to the wire and left the refusal to be dug out of the
+        # stream as a mid-answer error event. Token order is unchanged: nothing
+        # can be generated before the request is sent either way.
+        stream = (client or self.client).chat.completions.create(**request, stream=True)
+
+        yield {"type": "sources", "sources": sources}
+
         stripper = CitationStripper()
-        stream = self.client.chat.completions.create(**request, stream=True)
 
         finish_reason = None
         for chunk in stream:
@@ -597,7 +625,7 @@ Answer:
         logger.info(
             "streamed completion user_id=%s model=%s finish_reason=%s",
             user_id,
-            self.model,
+            model or self.model,
             finish_reason,
         )
         if finish_reason == "length":

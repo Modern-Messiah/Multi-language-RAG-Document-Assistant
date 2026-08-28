@@ -36,6 +36,10 @@ class Source(BaseModel):
 class QueryResponse(BaseModel):
     answer: str
     sources: List[Source]
+    # Which model answered. A caller who brought their own key and model gets
+    # confirmation that their choice took effect rather than having to trust
+    # it; null when nothing was asked of a model at all.
+    model: Optional[str] = None
 
 
 class UploadResponse(BaseModel):

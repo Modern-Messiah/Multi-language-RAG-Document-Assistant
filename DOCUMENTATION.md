@@ -302,6 +302,10 @@ Uploads and indexes a document.
     -   `503` - the vector store rejected the write (retryable).
 
 ### `POST /query`
+Answers a question. Two optional headers let the caller answer on their own
+account: `X-Model-Key` (their API key) and `X-Model` (the model they want). See
+Your own key and model.
+
 Asks a question against the indexed documents.
 -   **Body**: `{"question": "...", "language": "Auto", "user_id": "...",
     "history": [{"question": "...", "answer": "..."}]}`.
@@ -313,7 +317,8 @@ Asks a question against the indexed documents.
 -   **Response**:
     ```json
     {"answer": "...",
-     "sources": [{"id": 1, "source": "report.pdf", "preview": "first 200 chars…"}]}
+     "sources": [{"id": 1, "source": "report.pdf", "preview": "first 200 chars…"}],
+     "model": "gpt-4o-mini"}
     ```
     Sources are deduplicated by filename and numbered from 1. When nothing is retrieved
     the call still succeeds with `"No relevant information found."` and an empty
@@ -437,6 +442,67 @@ Deletes the caller's documents: both the vectors **and** the raw uploaded files 
 -   **Query Parameters**: `user_id` (**required**).
 -   **Response**: `{"message": "Documents cleared successfully"}`
 -   **Errors**: `401`, `422`, `500` (deletion failed).
+
+## Your own key and model
+
+A caller can answer on their own API key, with the model they choose:
+
+```bash
+curl -H "X-API-Key: $BACKEND_API_KEY" \
+     -H "X-Model-Key: sk-your-own-key" \
+     -H "X-Model: gpt-4o" \
+     -H "Content-Type: application/json" \
+     -d '{"question": "...", "user_id": "u1"}' \
+     http://127.0.0.1:8000/query
+```
+
+Both `/query` and `/query/stream` take the pair. `POST /query` answers with the
+`model` field so a caller can see which one actually replied rather than trust
+that the header took effect.
+
+**Answers only; indexing stays on the deployment's key.** The vector store is
+one ChromaDB collection bound to one embedding model - Chroma fixes the
+dimension per collection, and `embeddings.py` refuses to open a collection built
+by a different model, because vectors from two models are not comparable. So the
+choice on offer is the answer model, which is the one a person can tell apart
+anyway. An upload is embedded on the operator's key whatever headers it carries.
+
+**The key is never stored.** It arrives in a header, is used for one request,
+and the client holding it is closed when that request ends - including the
+streaming case, where it is closed after the last token rather than when the
+handler returns. Nothing writes it to disk and no cache is keyed on it: a
+connection pool per key would be faster and would mean the secret outlives the
+request that carried it. `user_id` is unauthenticated client input, so a stored
+key would also be one that anyone holding the shared secret could spend.
+
+**A model may only be chosen together with a key** (`400` otherwise). Without
+that rule, naming a model is a way to spend the operator's money on a costlier
+one than they configured.
+
+**The base URL is not negotiable.** `OPENAI_BASE_URL` stays the deployment's.
+Letting a caller name the endpoint would make the backend fetch whatever URL it
+is handed, internal addresses included.
+
+**When the provider refuses**, the caller hears about it rather than the
+operator: `400` with what happened - a rejected key, a model their key cannot
+reach, their own quota. This is the one place a `401` upstream is *not* an
+operator problem, and both clients hide `401`/`403` behind "contact the
+operator", so it must not travel that path. The provider's own wording is not
+passed through: it can carry account details and says nothing the caller cannot
+work out. Without a caller's key, an upstream failure keeps its old meaning -
+`429` with `Retry-After`, `504` on a timeout, `503` otherwise.
+
+In the clients:
+
+- **Streamlit**: a password field and a model box in the sidebar. Both live in
+  session state, so they go when the tab does, and the caption says so.
+- **Telegram**: `/model <model> <your api key>` sets them, `/model` shows what
+  is set without ever repeating the key back, `/model reset` forgets. The
+  message carrying the key is deleted immediately - it would otherwise sit in
+  the chat history on the device and on Telegram's servers - and if the bot
+  cannot delete it (no permission in a group) it says so rather than leaving the
+  user to assume it was handled. The pair is held in the chat's memory only and
+  is gone when the bot restarts.
 
 ## Quotas and retention
 
@@ -946,6 +1012,7 @@ subsequent search. To switch models, delete the collection directory
 │   ├── backup.py               # Snapshot and restore, with a verified manifest
 │   ├── activity.py             # Who was here when: the markers the sweep reads
 │   ├── humanize.py             # human_size and the quota line, shared with the clients
+│   ├── byok.py                 # Answering on the caller's own key and model
 │   ├── models/                 # Pydantic models (QueryRequest, QueryResponse)
 │   ├── rag/                    # RAG core logic
 │   │   ├── languages.py        # The one language table both clients derive from

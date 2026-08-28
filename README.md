@@ -30,6 +30,10 @@ ChromaDB vector store, OpenAI embeddings and chat.
   so a complaint becomes a case the evaluation harness can measure instead of a
   story. `python -m evaluation.from_feedback` turns the collected ones into
   golden-case stubs.
+- **Your Own Key and Model**: answer on your own API key with the model you
+  name, in either client. The key is never stored - it is used for one request
+  and let go. Indexing stays on the deployment's key, because the vector store
+  is bound to one embedding model.
 - **Bounded Growth**: per-owner limits on documents and bytes, shown in both
   clients before they are hit and refused loudly when they are. An idle-namespace
   sweep (`python -m scripts.sweep`) removes the web UI's abandoned per-session
@@ -101,6 +105,9 @@ ChromaDB vector store, OpenAI embeddings and chat.
    - Send any plain text message to ask a question about your documents.
    - `/documents` lists what is indexed, `/clear` deletes all of it,
      `/help` shows usage.
+   - `/model <model> <your api key>` answers on your own account with the model
+     you name; `/model reset` goes back to the assistant's own. The key is never
+     stored on the server, and the message carrying it is deleted.
 
 ## Run without Docker
 

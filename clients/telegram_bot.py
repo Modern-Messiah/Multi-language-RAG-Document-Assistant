@@ -24,6 +24,8 @@ from telegram.ext import (
 from app.rag.document_loader import SUPPORTED_EXTENSIONS
 from clients.backend import (
     AUTO_LANGUAGE,
+    KEY_HEADER,
+    MODEL_HEADER,
     REQUEST_ID_HEADER,
     SUPPORTED_LANGUAGES,
     api_headers,
@@ -294,10 +296,92 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "2. Send any text message to ask questions about your documents.\n"
         "3. Select a language from the keyboard to set the response language.\n"
         "4. Use /documents to see what I have indexed.\n"
-        "5. Use /clear to delete all of them.\n"
-        "6. Use /start to reset conversation."
+        "5. Use /model to answer on your own API key and model of choice.\n"
+        "6. Use /clear to delete all of them.\n"
+        "7. Use /start to reset conversation."
     )
     await update.message.reply_text(help_text)
+
+def asking_headers(context) -> dict:
+    """The shared secret, plus this chat's own key and model if it set any.
+
+    Questions only. An upload is embedded on the operator's key, because the
+    collection is bound to one embedding model.
+    """
+    headers = dict(BACKEND_HEADERS)
+    key = context.user_data.get("own_key")
+    if key:
+        headers[KEY_HEADER] = key
+        model = context.user_data.get("own_model")
+        if model:
+            headers[MODEL_HEADER] = model
+    return headers
+
+
+async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set, show or forget the key and model this chat answers on.
+
+    The key arrives in a chat message, which is the one bad thing about doing
+    this over Telegram: it lands in the history on the user's device and on
+    Telegram's servers. The message is deleted the moment it is read - the most
+    that can be done from here - and when that fails the user is told to do it
+    themselves rather than left thinking it was handled.
+    """
+    parts = (update.message.text or "").split()[1:]
+
+    if not parts:
+        held = "yes" if context.user_data.get("own_key") else "no"
+        model = context.user_data.get("own_model") or "the assistant's own"
+        await update.message.reply_text(
+            f"Your own key: {held}\nModel: {model}\n\n"
+            "To answer on your own account:\n"
+            "  /model <model> <your api key>\n"
+            "  /model reset - forget both\n\n"
+            "The key is never stored on the server. It is held in this chat's "
+            "memory only, and is gone when the bot restarts."
+        )
+        return
+
+    if parts[0] == "reset":
+        context.user_data.pop("own_key", None)
+        context.user_data.pop("own_model", None)
+        await update.message.reply_text(
+            "Forgotten. Answers come from the assistant's own model again."
+        )
+        return
+
+    if len(parts) < 2:
+        await update.message.reply_text(
+            "A model needs your own API key with it: /model <model> <your api "
+            "key>. Choosing a model on someone else's account is not on offer."
+        )
+        return
+
+    model, key = parts[0], parts[1]
+    context.user_data["own_model"] = model
+    context.user_data["own_key"] = key
+
+    deleted = True
+    try:
+        await update.message.delete()
+    except Exception:
+        deleted = False
+        logger.info("Could not delete the message carrying an API key")
+
+    warning = (
+        "Your message with the key has been deleted."
+        if deleted
+        else "<b>I could not delete your message - delete it yourself, it has "
+             "your key in it.</b>"
+    )
+    await update.message.chat.send_message(
+        f"Answers now come from <b>{html.escape(model)}</b> on your key.\n"
+        f"{warning}\n"
+        "The key is never stored on the server, and is gone when the bot "
+        "restarts.",
+        parse_mode="HTML",
+    )
+
 
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear user documents."""
@@ -447,7 +531,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "history": history[-HISTORY_TURNS:],
             }
             response = await client.post(
-                f"{BACKEND_URL}/query", json=payload, headers=BACKEND_HEADERS
+                f"{BACKEND_URL}/query", json=payload, headers=asking_headers(context)
             )
 
             if response.status_code == 200:
@@ -552,6 +636,7 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("clear", clear_command))
     app.add_handler(CommandHandler("documents", documents_command))
+    app.add_handler(CommandHandler("model", model_command))
 
     # Handle documents
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
