@@ -20,9 +20,16 @@ anyone holding the shared secret could spend.
 **A model may only be chosen together with a key.** Otherwise the choice is a
 way to spend the operator's money on a costlier model than they configured.
 
-**The base URL is not negotiable.** Letting a caller name the endpoint would
-make this backend fetch any URL it is told to, internal addresses included; the
-deployment's OPENAI_BASE_URL stands.
+**The endpoint is chosen from a list, never supplied.** A caller names a
+provider - "anthropic", "gemini", "deepseek", "kimi" - and the URL comes from
+the table below, which this file owns. Letting a caller pass the URL itself
+would make this backend fetch anything it is told to, internal addresses
+included. An operator who wants fewer providers than the list offers sets
+ALLOWED_MODEL_PROVIDERS.
+
+Every provider here speaks OpenAI's chat completions protocol, which is why one
+client library reaches all of them. Their endpoints were checked by asking each
+one with a deliberately invalid key; what came back is in the table.
 """
 import logging
 import re
@@ -35,6 +42,24 @@ logger = logging.getLogger(__name__)
 
 KEY_HEADER = "X-Model-Key"
 MODEL_HEADER = "X-Model"
+PROVIDER_HEADER = "X-Model-Provider"
+
+# Where each provider's OpenAI-compatible chat completions live. The client
+# library appends "chat/completions", so these are base URLs.
+#
+# "openai" is spelled None rather than a URL: it means the deployment's own
+# OPENAI_BASE_URL, which an operator may already have pointed at a gateway
+# (OpenRouter, LiteLLM, vLLM, Azure). Naming it explicitly is how a caller says
+# "the usual one" after another provider has been set.
+PROVIDERS = {
+    "openai": None,
+    "anthropic": "https://api.anthropic.com/v1/",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    "deepseek": "https://api.deepseek.com/v1",
+    "kimi": "https://api.moonshot.ai/v1",
+    # Moonshot runs separate estates; a key from one is not valid at the other.
+    "kimi-cn": "https://api.moonshot.cn/v1",
+}
 
 # Header values are latin-1 on the wire while clients send UTF-8, so a key with
 # anything outside this shape could never round-trip anyway. Bounded because it
@@ -55,8 +80,23 @@ class BringYourOwnKeyError(Exception):
     """Something the caller sent is unusable, and they can fix it."""
 
 
-def wanted(headers) -> tuple:
-    """The (key, model) a caller asked for, validated. Both may be None.
+def allowed_providers(settings=None) -> list:
+    """Provider names this deployment permits, in table order.
+
+    ALLOWED_MODEL_PROVIDERS empty means all of them. An operator on a network
+    with egress rules decides where their backend may connect; that is not a
+    caller's choice to make.
+    """
+    configured = (getattr(settings, "allowed_model_providers", "") or "").strip()
+    if not configured:
+        return list(PROVIDERS)
+
+    named = {name.strip().lower() for name in configured.split(",") if name.strip()}
+    return [name for name in PROVIDERS if name in named]
+
+
+def wanted(headers, settings=None) -> tuple:
+    """The (key, model, provider) a caller asked for, validated. Any may be None.
 
     Raises BringYourOwnKeyError with wording safe to show the caller. The key
     itself is never echoed back, not even truncated: whatever they sent, the
@@ -64,6 +104,7 @@ def wanted(headers) -> tuple:
     """
     key = (headers.get(KEY_HEADER) or "").strip()
     model = (headers.get(MODEL_HEADER) or "").strip()
+    provider = (headers.get(PROVIDER_HEADER) or "").strip().lower()
 
     if key and not _KEY.match(key):
         raise BringYourOwnKeyError(
@@ -74,27 +115,38 @@ def wanted(headers) -> tuple:
         raise BringYourOwnKeyError(
             "That model name has characters a model name cannot have."
         )
-    if model and not key:
+    if (model or provider) and not key:
         raise BringYourOwnKeyError(
-            "Choosing a model needs your own API key: send both, or neither "
-            "and the assistant answers with its configured model."
+            "Choosing a model or a provider needs your own API key: send it "
+            "too, or send neither and the assistant answers with its own."
         )
+    if provider:
+        permitted = allowed_providers(settings)
+        if provider not in permitted:
+            raise BringYourOwnKeyError(
+                f"Unknown or disallowed provider. This deployment offers: "
+                f"{', '.join(permitted)}."
+            )
 
-    return (key or None), (model or None)
+    return (key or None), (model or None), (provider or None)
 
 
-def client_for(key: str, settings) -> OpenAI:
-    """An OpenAI client on the caller's key, on this deployment's endpoint.
+def client_for(key: str, settings, provider: str = None) -> OpenAI:
+    """An OpenAI-protocol client on the caller's key, at the named provider.
 
-    The caller closes it. Every transport setting except the key is the
-    deployment's, so a user's key cannot make the backend talk to somewhere
-    else or wait longer than the operator allows.
+    The caller closes it. Timeouts and retries stay the deployment's, and the
+    URL comes from PROVIDERS rather than from the request, so a caller's key
+    cannot make the backend wait longer than the operator allows or talk to an
+    address the operator never listed.
     """
     options = {
         "timeout": settings.openai_timeout,
         "max_retries": settings.openai_max_retries,
     }
-    if settings.openai_base_url:
+    base_url = PROVIDERS.get(provider) if provider else None
+    if base_url:
+        options["base_url"] = base_url
+    elif settings.openai_base_url:
         options["base_url"] = settings.openai_base_url
 
     return OpenAI(
@@ -125,6 +177,18 @@ def describe_upstream_refusal(exc) -> Optional[str]:
         return (
             "Your API key is out of quota or rate limited by the provider. "
             "This is on your account, not on the assistant."
+        )
+    if status == 402:
+        return "Your account with that provider is out of balance."
+    if status is not None:
+        # Anything else the provider answered with. There is one because
+        # providers disagree about what a bad key is: OpenAI, Anthropic,
+        # DeepSeek and Moonshot say 401, Gemini says 400. Without this, a
+        # Gemini key typo fell through to "Query failed" and looked like the
+        # operator's fault.
+        return (
+            f"The provider refused the request (HTTP {status}). Check the key "
+            "and that the model name is one that provider offers."
         )
     return None
 

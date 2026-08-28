@@ -85,6 +85,12 @@ class Settings(BaseSettings):
     upload_dir: Path = Path("data/uploads")
     max_file_size: int = Field(default=30 * 1024 * 1024, ge=1)  # 30 MB
 
+    # Which model providers a caller may name with their own key. Empty means
+    # every provider in app/byok.py's table. The list exists because outbound
+    # connections are the operator's business: a deployment behind egress rules
+    # decides where its backend may talk, and that is not a caller's choice.
+    allowed_model_providers: str = ""
+
     # --- Per-owner quotas ---
     # Until these existed the only bound was MAX_FILE_SIZE, on one file. One
     # user_id could fill the volume the vector store lives on, and every upload

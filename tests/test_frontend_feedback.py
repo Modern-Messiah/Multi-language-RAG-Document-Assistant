@@ -437,3 +437,38 @@ def test_the_sidebar_names_the_model_in_use(app):
     app.run()
 
     assert any("gpt-4o" in c.value for c in app.caption)
+
+
+def test_the_web_ui_sends_the_provider_it_was_given(app):
+    app.session_state["own_key"] = OWN_KEY
+    app.session_state["own_model"] = "claude-sonnet-4"
+    app.session_state["own_provider"] = "anthropic"
+    app.run()
+
+    _ask(app)
+
+    from app.byok import PROVIDER_HEADER
+
+    assert app.fake.headers_for("/query/stream")[PROVIDER_HEADER] == "anthropic"
+
+
+def test_the_default_provider_is_not_sent(app):
+    """"openai" means the deployment's own endpoint, which is what happens
+    when no provider header arrives - so sending it would be noise."""
+    app.session_state["own_key"] = OWN_KEY
+    app.session_state["own_provider"] = "openai"
+    app.run()
+
+    _ask(app)
+
+    from app.byok import PROVIDER_HEADER
+
+    assert PROVIDER_HEADER not in app.fake.headers_for("/query/stream")
+
+
+def test_the_picker_offers_every_provider_the_backend_knows(app):
+    from app.byok import PROVIDERS
+
+    options = [s.options for s in app.selectbox]
+
+    assert any(list(PROVIDERS) == list(o) for o in options), options

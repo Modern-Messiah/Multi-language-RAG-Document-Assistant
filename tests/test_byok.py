@@ -70,18 +70,18 @@ def _openai_error(cls, status):
 # =========================
 
 def test_nothing_asked_for_is_nothing_returned():
-    assert byok.wanted({}) == (None, None)
+    assert byok.wanted({}) == (None, None, None)
 
 
 def test_a_key_and_a_model_come_back():
-    key, model = byok.wanted({KEY_HEADER: GOOD_KEY, MODEL_HEADER: "gpt-4o"})
+    key, model, provider = byok.wanted({KEY_HEADER: GOOD_KEY, MODEL_HEADER: "gpt-4o"})
 
-    assert (key, model) == (GOOD_KEY, "gpt-4o")
+    assert (key, model, provider) == (GOOD_KEY, "gpt-4o", None)
 
 
 def test_a_key_alone_is_enough():
     """Their key, the deployment's model: a reasonable thing to want."""
-    assert byok.wanted({KEY_HEADER: GOOD_KEY}) == (GOOD_KEY, None)
+    assert byok.wanted({KEY_HEADER: GOOD_KEY}) == (GOOD_KEY, None, None)
 
 
 def test_a_model_without_a_key_is_refused():
@@ -171,7 +171,7 @@ def test_a_question_without_a_key_uses_the_deployments_model(api):
 def test_a_caller_with_a_key_gets_their_own_model(api, monkeypatch):
     _index(api)
     theirs = FakeChatClient(answer="Answered on your key.")
-    monkeypatch.setattr(byok, "client_for", lambda key, settings: theirs)
+    monkeypatch.setattr(byok, "client_for", lambda key, settings, provider=None: theirs)
 
     body = _ask(api, {KEY_HEADER: GOOD_KEY, MODEL_HEADER: "gpt-4o"}).json()
 
@@ -185,7 +185,7 @@ def test_their_key_is_the_one_handed_to_the_client(api, monkeypatch):
     _index(api)
     seen = {}
 
-    def watching(key, settings):
+    def watching(key, settings, provider=None):
         seen["key"] = key
         return FakeChatClient()
 
@@ -199,7 +199,7 @@ def test_their_key_is_the_one_handed_to_the_client(api, monkeypatch):
 def test_a_key_without_a_model_answers_with_the_configured_one(api, monkeypatch):
     _index(api)
     theirs = FakeChatClient()
-    monkeypatch.setattr(byok, "client_for", lambda key, settings: theirs)
+    monkeypatch.setattr(byok, "client_for", lambda key, settings, provider=None: theirs)
 
     body = _ask(api, {KEY_HEADER: GOOD_KEY}).json()
 
@@ -213,7 +213,7 @@ def test_a_model_without_a_key_is_a_400(api):
     response = _ask(api, {MODEL_HEADER: "gpt-4o"})
 
     assert response.status_code == 400
-    assert "own API key" in response.json()["detail"]
+    assert "needs your own API key" in response.json()["detail"]
 
 
 def test_a_malformed_key_is_a_400_and_answers_nothing(api):
@@ -229,7 +229,7 @@ def test_the_follow_up_rewrite_goes_on_their_key_too(api, monkeypatch):
     """Billing half an exchange to each side would be the strangest split."""
     _index(api)
     theirs = FakeChatClient()
-    monkeypatch.setattr(byok, "client_for", lambda key, settings: theirs)
+    monkeypatch.setattr(byok, "client_for", lambda key, settings, provider=None: theirs)
 
     api.post("/query", json={
         "question": "and the second one?",
@@ -256,7 +256,7 @@ def test_the_caller_hears_what_their_key_did(api, monkeypatch, cls, status, expe
     _index(api)
     monkeypatch.setattr(
         byok, "client_for",
-        lambda key, settings: Refusing(_openai_error(cls, status)),
+        lambda key, settings, provider=None: Refusing(_openai_error(cls, status)),
     )
 
     response = _ask(api, {KEY_HEADER: GOOD_KEY})
@@ -271,7 +271,7 @@ def test_a_refusal_does_not_leak_the_providers_own_words(api, monkeypatch):
     _index(api)
     monkeypatch.setattr(
         byok, "client_for",
-        lambda key, settings: Refusing(_openai_error(AuthenticationError, 401)),
+        lambda key, settings, provider=None: Refusing(_openai_error(AuthenticationError, 401)),
     )
 
     detail = _ask(api, {KEY_HEADER: GOOD_KEY}).json()["detail"]
@@ -313,7 +313,7 @@ def test_the_clients_key_does_not_outlive_the_request(api, monkeypatch):
     _index(api)
     built = []
 
-    def watching(key, settings):
+    def watching(key, settings, provider=None):
         client = FakeChatClient()
         client.closed = False
         client.close = lambda: setattr(client, "closed", True)
@@ -332,7 +332,7 @@ def test_the_clients_key_does_not_outlive_the_request(api, monkeypatch):
 def test_the_key_is_let_go_even_when_the_provider_refuses(api, monkeypatch):
     _index(api)
     refusing = Refusing(_openai_error(AuthenticationError, 401))
-    monkeypatch.setattr(byok, "client_for", lambda key, settings: refusing)
+    monkeypatch.setattr(byok, "client_for", lambda key, settings, provider=None: refusing)
 
     _ask(api, {KEY_HEADER: GOOD_KEY})
 
@@ -343,7 +343,7 @@ def test_nothing_writes_the_key_anywhere(api, monkeypatch, caplog):
     """The one property that makes "not stored" true: not in the log, not in
     the access line, not in a rating."""
     _index(api)
-    monkeypatch.setattr(byok, "client_for", lambda key, settings: FakeChatClient())
+    monkeypatch.setattr(byok, "client_for", lambda key, settings, provider=None: FakeChatClient())
 
     with caplog.at_level("DEBUG"):
         _ask(api, {KEY_HEADER: GOOD_KEY, MODEL_HEADER: "gpt-4o"})
@@ -368,7 +368,7 @@ def test_a_streamed_answer_uses_their_key_and_closes_it(api, monkeypatch):
     theirs = FakeChatClient(answer="Streamed on your key.")
     theirs.closed = False
     theirs.close = lambda: setattr(theirs, "closed", True)
-    monkeypatch.setattr(byok, "client_for", lambda key, settings: theirs)
+    monkeypatch.setattr(byok, "client_for", lambda key, settings, provider=None: theirs)
 
     with api.stream("POST", "/query/stream", json={
         "question": "How many leave days?", "language": "Auto", "user_id": "u1",
@@ -390,7 +390,7 @@ def test_a_streamed_refusal_is_a_status_code_not_a_broken_stream(api, monkeypatc
     is what lets this stay an ordinary 400."""
     _index(api)
     refusing = Refusing(_openai_error(AuthenticationError, 401))
-    monkeypatch.setattr(byok, "client_for", lambda key, settings: refusing)
+    monkeypatch.setattr(byok, "client_for", lambda key, settings, provider=None: refusing)
 
     response = api.post("/query/stream", json={
         "question": "How many leave days?", "language": "Auto", "user_id": "u1",
@@ -403,7 +403,7 @@ def test_a_streamed_refusal_is_a_status_code_not_a_broken_stream(api, monkeypatc
 
 def test_the_sources_event_still_comes_first(api, monkeypatch):
     _index(api)
-    monkeypatch.setattr(byok, "client_for", lambda key, settings: FakeChatClient())
+    monkeypatch.setattr(byok, "client_for", lambda key, settings, provider=None: FakeChatClient())
 
     with api.stream("POST", "/query/stream", json={
         "question": "How many leave days?", "language": "Auto", "user_id": "u1",
@@ -423,7 +423,7 @@ def test_indexing_stays_on_the_deployments_key(api, monkeypatch):
     calls = []
     monkeypatch.setattr(
         byok, "client_for",
-        lambda key, settings: calls.append(key) or FakeChatClient(),
+        lambda key, settings, provider=None: calls.append(key) or FakeChatClient(),
     )
 
     api.post(
@@ -618,3 +618,269 @@ def test_the_bot_actually_sends_the_headers_when_asked_a_question():
 
     assert seen["headers"][KEY_HEADER] == GOOD_KEY
     assert seen["headers"][MODEL_HEADER] == "gpt-4o"
+
+
+# =========================
+# Choosing a provider
+# =========================
+# Every provider here answers OpenAI's chat completions protocol, which is why
+# one client library reaches all of them. The URLs were checked by asking each
+# one with a deliberately invalid key.
+
+def test_the_offered_providers_are_the_ones_documented():
+    from app.byok import PROVIDERS
+
+    assert set(PROVIDERS) == {
+        "openai", "anthropic", "gemini", "deepseek", "kimi", "kimi-cn"
+    }
+
+
+def test_openai_means_the_deployments_own_endpoint(tmp_path):
+    """Named explicitly so a caller can say "the usual one" after another
+    provider was set, and so an operator's gateway is not overridden."""
+    from app.byok import PROVIDERS
+    from tests.conftest import make_settings
+
+    assert PROVIDERS["openai"] is None
+
+    settings = make_settings(tmp_path, openai_base_url="http://gw:9/v1")
+    client = byok.client_for(GOOD_KEY, settings, "openai")
+    try:
+        assert str(client.base_url).startswith("http://gw:9/v1")
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("provider,host", [
+    ("anthropic", "api.anthropic.com"),
+    ("gemini", "generativelanguage.googleapis.com"),
+    ("deepseek", "api.deepseek.com"),
+    ("kimi", "api.moonshot.ai"),
+    ("kimi-cn", "api.moonshot.cn"),
+])
+def test_each_provider_gets_its_own_endpoint(tmp_path, provider, host):
+    from tests.conftest import make_settings
+
+    client = byok.client_for(GOOD_KEY, make_settings(tmp_path), provider)
+    try:
+        assert host in str(client.base_url)
+    finally:
+        client.close()
+
+
+def test_a_providers_url_beats_the_deployments(tmp_path):
+    """Otherwise naming Anthropic on a deployment configured for a gateway
+    would quietly send an Anthropic key to the gateway."""
+    from tests.conftest import make_settings
+
+    settings = make_settings(tmp_path, openai_base_url="http://gw:9/v1")
+    client = byok.client_for(GOOD_KEY, settings, "deepseek")
+    try:
+        assert "api.deepseek.com" in str(client.base_url)
+    finally:
+        client.close()
+
+
+def test_the_caller_still_cannot_name_a_url():
+    """The whole reason a provider is a name and not an address: a URL from the
+    request would make this backend fetch whatever it is handed."""
+    with pytest.raises(byok.BringYourOwnKeyError, match="Unknown or disallowed"):
+        byok.wanted({
+            KEY_HEADER: GOOD_KEY,
+            byok.PROVIDER_HEADER: "http://169.254.169.254/latest/meta-data",
+        })
+
+
+def test_a_provider_without_a_key_is_refused():
+    with pytest.raises(byok.BringYourOwnKeyError, match="needs your own API key"):
+        byok.wanted({byok.PROVIDER_HEADER: "anthropic"})
+
+
+def test_provider_names_are_case_insensitive():
+    assert byok.wanted({KEY_HEADER: GOOD_KEY, byok.PROVIDER_HEADER: "Anthropic"})[2] == "anthropic"
+
+
+def test_an_operator_can_narrow_the_list(tmp_path):
+    """Outbound connections are the operator's business: a deployment behind
+    egress rules decides where its backend may talk."""
+    from tests.conftest import make_settings
+
+    settings = make_settings(tmp_path, allowed_model_providers="openai, deepseek")
+
+    assert byok.allowed_providers(settings) == ["openai", "deepseek"]
+    with pytest.raises(byok.BringYourOwnKeyError, match="This deployment offers"):
+        byok.wanted({KEY_HEADER: GOOD_KEY, byok.PROVIDER_HEADER: "kimi"}, settings)
+
+
+def test_an_empty_list_means_every_provider(tmp_path):
+    from app.byok import PROVIDERS
+    from tests.conftest import make_settings
+
+    assert byok.allowed_providers(make_settings(tmp_path)) == list(PROVIDERS)
+
+
+def test_the_refusal_names_what_is_on_offer(tmp_path):
+    from tests.conftest import make_settings
+
+    settings = make_settings(tmp_path, allowed_model_providers="gemini")
+
+    with pytest.raises(byok.BringYourOwnKeyError) as exc:
+        byok.wanted({KEY_HEADER: GOOD_KEY, byok.PROVIDER_HEADER: "anthropic"}, settings)
+
+    assert "gemini" in str(exc.value)
+
+
+def test_a_provider_reaches_the_client_through_the_api(api, monkeypatch):
+    _index(api)
+    seen = {}
+
+    def watching(key, settings, provider=None):
+        seen["provider"] = provider
+        return FakeChatClient()
+
+    monkeypatch.setattr(byok, "client_for", watching)
+
+    _ask(api, {KEY_HEADER: GOOD_KEY, byok.PROVIDER_HEADER: "gemini",
+               MODEL_HEADER: "gemini-2.0-flash"})
+
+    assert seen["provider"] == "gemini"
+
+
+def test_an_unknown_provider_is_a_400(api):
+    _index(api)
+
+    response = _ask(api, {KEY_HEADER: GOOD_KEY, byok.PROVIDER_HEADER: "nonesuch"})
+
+    assert response.status_code == 400
+    assert "anthropic" in response.json()["detail"]
+
+
+# =========================
+# Providers disagree about refusals
+# =========================
+
+def test_a_gemini_style_400_is_still_the_callers_problem(api, monkeypatch):
+    """OpenAI, Anthropic, DeepSeek and Moonshot answer a bad key with 401;
+    Gemini answers 400. Checked against all five with an invalid key. Without
+    this branch a Gemini typo fell through to "Query failed", which blames the
+    operator for the caller's mistake."""
+    from openai import BadRequestError
+
+    _index(api)
+    monkeypatch.setattr(
+        byok, "client_for",
+        lambda key, settings, provider=None: Refusing(_openai_error(BadRequestError, 400)),
+    )
+
+    response = _ask(api, {KEY_HEADER: GOOD_KEY, byok.PROVIDER_HEADER: "gemini"})
+
+    assert response.status_code == 400
+    assert "HTTP 400" in response.json()["detail"]
+    assert "model name" in response.json()["detail"]
+
+
+def test_an_empty_balance_says_so(api, monkeypatch):
+    """DeepSeek answers 402 when an account runs dry."""
+    from openai import APIStatusError
+
+    _index(api)
+    monkeypatch.setattr(
+        byok, "client_for",
+        lambda key, settings, provider=None: Refusing(_openai_error(APIStatusError, 402)),
+    )
+
+    assert "out of balance" in _ask(api, {KEY_HEADER: GOOD_KEY}).json()["detail"]
+
+
+def test_a_failure_with_no_status_is_not_blamed_on_the_caller():
+    """A connection reset or a timeout says nothing about their key."""
+    assert byok.describe_upstream_refusal(RuntimeError("connection reset")) is None
+
+
+def test_the_bot_takes_a_provider_as_a_third_word():
+    """The provider list is a closed set, so "gemini gemini-2.0-flash <key>"
+    cannot be mistaken for a model called "gemini"."""
+    _, sent, data = _model_command(f"/model gemini gemini-2.0-flash {GOOD_KEY}")
+
+    assert data["own_provider"] == "gemini"
+    assert data["own_model"] == "gemini-2.0-flash"
+    assert data["own_key"] == GOOD_KEY
+    assert "gemini" in sent[0]
+
+
+def test_two_words_still_mean_model_and_key():
+    _, _, data = _model_command(f"/model gpt-4o {GOOD_KEY}")
+
+    assert data["own_model"] == "gpt-4o"
+    assert "own_provider" not in data
+
+
+def test_naming_a_model_without_a_provider_forgets_the_last_one():
+    """Otherwise a switch back to OpenAI would keep sending an OpenAI key to
+    Anthropic."""
+    _, _, data = _model_command(
+        f"/model gpt-4o {GOOD_KEY}",
+        user_data={"own_provider": "anthropic", "own_model": "claude", "own_key": "old"},
+    )
+
+    assert "own_provider" not in data
+
+
+def test_reset_forgets_the_provider_too():
+    _, _, data = _model_command(
+        "/model reset",
+        user_data={"own_provider": "kimi", "own_model": "k", "own_key": GOOD_KEY},
+    )
+
+    assert data == {}
+
+
+def test_the_bot_lists_the_providers_it_can_reach():
+    replies, _, _ = _model_command("/model")
+
+    for provider in ("anthropic", "gemini", "deepseek", "kimi"):
+        assert provider in replies[0]
+
+
+def test_the_bot_sends_the_provider_with_a_question():
+    from types import SimpleNamespace
+
+    from clients.telegram_bot import asking_headers
+
+    headers = asking_headers(SimpleNamespace(user_data={
+        "own_key": GOOD_KEY, "own_model": "claude-sonnet-4", "own_provider": "anthropic",
+    }))
+
+    assert headers[byok.PROVIDER_HEADER] == "anthropic"
+
+
+def test_the_bot_sends_no_provider_when_none_was_chosen():
+    from types import SimpleNamespace
+
+    from clients.telegram_bot import asking_headers
+
+    headers = asking_headers(SimpleNamespace(user_data={"own_key": GOOD_KEY}))
+
+    assert byok.PROVIDER_HEADER not in headers
+
+
+def test_the_deployments_allowlist_is_enforced_by_the_api(tmp_path, fake_openai_embeddings):
+    """Not just by byok.wanted when a test calls it directly: the handler has
+    to hand the settings over, or the operator's list is decoration."""
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+    from tests.conftest import TEST_API_KEY, make_settings
+
+    settings = make_settings(tmp_path, allowed_model_providers="openai")
+    app = create_app(settings)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        client.headers["X-API-Key"] = TEST_API_KEY
+        app.state.rag_chain.client = FakeChatClient()
+
+        response = client.post("/query", json={
+            "question": "q", "language": "Auto", "user_id": "u1",
+        }, headers={KEY_HEADER: GOOD_KEY, byok.PROVIDER_HEADER: "gemini"})
+
+    assert response.status_code == 400
+    assert "This deployment offers: openai" in response.json()["detail"]
