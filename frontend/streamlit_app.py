@@ -18,6 +18,8 @@ from app.rag.document_loader import (  # noqa: E402  (must follow the sys.path f
     SUPPORTED_EXTENSIONS,
 )
 from clients.backend import (  # noqa: E402
+    KEY_HEADER,
+    MODEL_HEADER,
     REQUEST_ID_HEADER,
     SUPPORTED_LANGUAGES,
     api_headers,
@@ -57,6 +59,23 @@ UPLOAD_LABEL = " or ".join(
 # Shared secret for the backend; empty means the backend runs with auth
 # disabled (development mode) and the header is simply ignored.
 HEADERS = api_headers()
+
+
+def asking_headers() -> dict:
+    """The shared secret, plus this session's own key and model if it gave any.
+
+    Only questions carry them: uploads are embedded on the operator's key,
+    because the collection is bound to one embedding model.
+    """
+    headers = dict(HEADERS)
+    key = st.session_state.get("own_key", "").strip()
+    if key:
+        headers[KEY_HEADER] = key
+        model = st.session_state.get("own_model", "").strip()
+        if model:
+            headers[MODEL_HEADER] = model
+    return headers
+
 
 backend_error = error_from_response
 
@@ -357,6 +376,32 @@ with st.sidebar:
     # The per-owner limits come from the backend's own answer, not from a
     # mirrored setting: a UI that advertised a limit the API did not enforce
     # was how "Any number of documents" stood here after quotas shipped.
+    st.divider()
+
+    # =========================
+    # Your own model
+    # =========================
+    st.header("🔑 Your own model")
+    st.caption(
+        "Optional. Give your own API key and answers come from it, with the "
+        "model you name. The key is never stored: it lives in this browser "
+        "session and goes when the tab does."
+    )
+    st.session_state.setdefault("own_key", "")
+    st.session_state.setdefault("own_model", "")
+    st.text_input(
+        "API key", type="password", key="own_key", placeholder="sk-...",
+        help="Answers only - indexing stays on the operator's key.",
+    )
+    st.text_input(
+        "Model", key="own_model", placeholder="gpt-4o",
+        help="Any model your key can reach. Empty means the assistant's own.",
+        disabled=not st.session_state["own_key"],
+    )
+    if st.session_state["own_key"]:
+        chosen = st.session_state["own_model"] or "the assistant's model"
+        st.caption(f"Answers come from **{chosen}** on your key.")
+
     limits = [f"Up to **{MAX_FILE_MB} MB per file**"]
     if quota_line:
         limits.insert(0, f"You hold **{quota_line}**")
@@ -507,7 +552,7 @@ if question and question.strip():
             response = requests.post(
                 f"{API_URL}/query/stream",
                 json=payload,
-                headers=HEADERS,
+                headers=asking_headers(),
                 stream=True,
                 timeout=120,
             )

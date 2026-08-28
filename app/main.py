@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from openai import APITimeoutError, RateLimitError
 
+from app import byok
 from app.activity import ActivityTracker, is_owner_name
 from app.config import Settings, get_settings
 from app.feedback import FeedbackStorageFull, store_from_settings
@@ -474,6 +475,19 @@ def _remove_stored_file(settings: Settings, user_id: str, file_hash: str) -> Non
         path.unlink(missing_ok=True)
 
 
+def _caller_model(request: Request) -> tuple:
+    """The key and model this caller asked to answer with, if any.
+
+    A malformed pair is a 400 rather than a silent fall back to the operator's
+    key: someone who sent a key meant to use it, and quietly spending the
+    operator's money instead is the one outcome nobody asked for.
+    """
+    try:
+        return byok.wanted(request.headers)
+    except byok.BringYourOwnKeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 # =========================
 # Per-owner quotas
 # =========================
@@ -595,14 +609,27 @@ def _quota_usage(state, settings: Settings, user_id: str) -> QuotaUsage:
 # calls are synchronous, so as a coroutine this blocked the whole event loop.
 @router.post("/query", response_model=QueryResponse)
 def query_rag(request: Request, payload: QueryRequest):
+    settings: Settings = request.app.state.settings
+    key, model = _caller_model(request)
+    client = byok.client_for(key, settings) if key else None
+
     try:
         answer = request.app.state.rag_chain.ask(
             question=payload.question,
             language=payload.language,
             user_id=payload.user_id,
             history=payload.history,
+            client=client,
+            model=model,
         )
     except RateLimitError as exc:
+        if client:
+            # Their key, their quota: "retry shortly" would be wrong advice,
+            # and a 429 tells a client to do exactly that.
+            byok.close_quietly(client)
+            raise HTTPException(
+                status_code=400, detail=byok.describe_upstream_refusal(exc)
+            )
         # A quota or rate-limit rejection is retryable and temporary; saying so
         # lets a client back off instead of treating it as a broken backend.
         logger.warning("OpenAI rate limited the request: %s", exc)
@@ -616,9 +643,17 @@ def query_rag(request: Request, payload: QueryRequest):
         raise HTTPException(
             status_code=504, detail="The model did not answer in time. Please retry."
         )
-    except Exception:
+    except Exception as exc:
+        refusal = byok.describe_upstream_refusal(exc) if client else None
+        if refusal:
+            # The caller's own key was refused. Every other 401 here is the
+            # operator's problem and both clients hide it as one; this one the
+            # caller can fix, so it must not travel that path.
+            raise HTTPException(status_code=400, detail=refusal)
         logger.exception("Query failed")
         raise HTTPException(status_code=503, detail="Query failed")
+    finally:
+        byok.close_quietly(client)
 
     request.app.state.activity.touch(payload.user_id)
     return answer
@@ -690,16 +725,29 @@ def query_rag_stream(request: Request, payload: QueryRequest):
     still ordinary status codes, rather than something a client has to dig out
     of a stream whose headers already said 200.
     """
+    settings: Settings = request.app.state.settings
+    key, model = _caller_model(request)
+    client = byok.client_for(key, settings) if key else None
+
     stream = request.app.state.rag_chain.ask_stream(
         question=payload.question,
         language=payload.language,
         user_id=payload.user_id,
         history=payload.history,
+        client=client,
+        model=model,
     )
 
     try:
         first_event = next(stream)
     except RateLimitError as exc:
+        if client:
+            # Their key, their quota: "retry shortly" would be wrong advice,
+            # and a 429 tells a client to do exactly that.
+            byok.close_quietly(client)
+            raise HTTPException(
+                status_code=400, detail=byok.describe_upstream_refusal(exc)
+            )
         logger.warning("OpenAI rate limited the request: %s", exc)
         raise HTTPException(
             status_code=429,
@@ -711,7 +759,11 @@ def query_rag_stream(request: Request, payload: QueryRequest):
         raise HTTPException(
             status_code=504, detail="The model did not answer in time. Please retry."
         )
-    except Exception:
+    except Exception as exc:
+        refusal = byok.describe_upstream_refusal(exc) if client else None
+        byok.close_quietly(client)
+        if refusal:
+            raise HTTPException(status_code=400, detail=refusal)
         logger.exception("Query failed")
         raise HTTPException(status_code=503, detail="Query failed")
 
@@ -720,15 +772,22 @@ def query_rag_stream(request: Request, payload: QueryRequest):
     request.app.state.activity.touch(payload.user_id)
 
     def events():
-        yield _sse(first_event)
+        # The caller's client has to outlive this handler - the stream is read
+        # after it returns - so it is closed here, when the last token has gone
+        # out or the connection has died. Closing it in the handler would have
+        # ended the stream before its first token.
         try:
-            for event in stream:
-                yield _sse(event)
-        except Exception:
-            # The status line is long gone by now, so the only honest way to
-            # report this is in the stream itself.
-            logger.exception("Streaming failed after the response started")
-            yield _sse({"type": "error", "detail": "The answer was cut short."})
+            yield _sse(first_event)
+            try:
+                for event in stream:
+                    yield _sse(event)
+            except Exception:
+                # The status line is long gone by now, so the only honest way
+                # to report this is in the stream itself.
+                logger.exception("Streaming failed after the response started")
+                yield _sse({"type": "error", "detail": "The answer was cut short."})
+        finally:
+            byok.close_quietly(client)
 
     return StreamingResponse(
         events(),

@@ -50,8 +50,10 @@ class FakeRequests:
 
     def __init__(self):
         self.posted = []
+        self.sent_headers = []
 
     def get(self, url, **kwargs):
+        self.sent_headers.append((url, kwargs.get("headers") or {}))
         if url.endswith("/documents"):
             return FakeResponse({
                 "documents": [{
@@ -64,8 +66,20 @@ class FakeRequests:
             })
         return FakeResponse({"status": "ok"})
 
+    def headers_for(self, suffix):
+        """The headers of the last request to a path, or None if there was none.
+
+        Recorded because what a client sends in a header - the shared secret, a
+        caller's own model key - is as much part of its behaviour as the body.
+        """
+        for url, headers in reversed(self.sent_headers):
+            if url.endswith(suffix):
+                return headers
+        return None
+
     def post(self, url, **kwargs):
         self.posted.append((url, kwargs.get("json")))
+        self.sent_headers.append((url, kwargs.get("headers") or {}))
         if url.endswith("/query/stream"):
             return FakeResponse(
                 lines=[_sse({"type": "sources", "sources": SOURCES}),
@@ -351,3 +365,75 @@ def test_deleting_a_document_lets_a_refused_file_be_retried(app):
     state = app.session_state
     assert "failed_files" not in state or not state["failed_files"], "the refusal was kept"
     assert not any("big.pdf" in e.value for e in app.error)
+
+
+# =========================
+# Answering on your own key
+# =========================
+# The sidebar takes an API key and a model name and sends them with a question.
+# Nothing about them is stored: the backend refuses to keep a key, and here they
+# live in session state, which goes when the tab does.
+
+from app.byok import KEY_HEADER, MODEL_HEADER  # noqa: E402
+
+OWN_KEY = "sk-test-0123456789abcdefghij"
+
+
+def test_no_key_typed_means_no_header_sent(app):
+    """A header nobody asked for would make the backend answer on a key that
+    does not exist."""
+    _ask(app)
+
+    sent = app.fake.headers_for("/query/stream")
+    assert KEY_HEADER not in sent
+    assert MODEL_HEADER not in sent
+
+
+def test_the_key_and_model_go_with_the_question(app):
+    app.session_state["own_key"] = OWN_KEY
+    app.session_state["own_model"] = "gpt-4o"
+    app.run()
+
+    _ask(app)
+
+    sent = app.fake.headers_for("/query/stream")
+    assert sent[KEY_HEADER] == OWN_KEY
+    assert sent[MODEL_HEADER] == "gpt-4o"
+
+
+def test_a_model_is_never_sent_without_a_key(app):
+    """The backend refuses that pair - choosing a model on someone else's
+    account - so sending it would only earn a 400."""
+    app.session_state["own_key"] = ""
+    app.session_state["own_model"] = "gpt-4o"
+    app.run()
+
+    _ask(app)
+
+    assert MODEL_HEADER not in app.fake.headers_for("/query/stream")
+
+
+def test_uploading_stays_on_the_operators_key(app):
+    """Indexing is not the caller's to pay for: one collection, one embedding
+    model, and the deployment owns it."""
+    app.session_state["own_key"] = OWN_KEY
+    app.run()
+
+    sent = app.fake.headers_for("/upload")
+
+    assert sent is None or KEY_HEADER not in sent
+
+
+def test_the_sidebar_says_the_key_is_not_kept(app):
+    """The one thing a person handing over an API key wants to know."""
+    captions = " ".join(c.value for c in app.caption)
+
+    assert "never stored" in captions
+
+
+def test_the_sidebar_names_the_model_in_use(app):
+    app.session_state["own_key"] = OWN_KEY
+    app.session_state["own_model"] = "gpt-4o"
+    app.run()
+
+    assert any("gpt-4o" in c.value for c in app.caption)

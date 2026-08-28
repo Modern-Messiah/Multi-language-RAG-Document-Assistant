@@ -128,7 +128,7 @@ def test_docs_state_the_real_chunking_defaults():
     assert "500" not in described and "50 char" not in described
 
 
-BOT_COMMANDS = {"start", "help", "clear", "documents"}
+BOT_COMMANDS = {"start", "help", "clear", "documents", "model"}
 
 
 def _registered_bot_commands():
