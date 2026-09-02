@@ -217,6 +217,9 @@ data/uploads/*
 # Snapshots written by scripts/backup.py
 data/backups/
 
+# Collected answer ratings (user questions and answers)
+data/feedback/
+
 # ChromaDB vector database
 data/chroma_db/*
 !data/chroma_db/.gitkeep

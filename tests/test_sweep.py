@@ -14,7 +14,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.activity import ACTIVITY_DIRNAME, ActivityTracker, is_owner_name
-from app.main import MIN_IDLE_DAYS_TO_APPLY, USER_ID_PATTERN
+from app.main import USER_ID_PATTERN
+from app.sweep import MIN_IDLE_DAYS_TO_APPLY
 
 TEXT = b"Annual leave for an engineer is twenty eight calendar days."
 OTHER = b"Sick leave is paid from the first day of absence, on a certificate."
@@ -625,7 +626,7 @@ def test_deletion_is_logged_before_it_happens(api, caplog):
     _idle_web_owner(api)
     _upload(api, "12345")
 
-    with caplog.at_level("WARNING", logger="app.main"):
+    with caplog.at_level("WARNING", logger="app.sweep"):
         _sweep(api, apply="true")
 
     lines = [r.getMessage() for r in caplog.records if "Sweeping" in r.getMessage()]
@@ -666,21 +667,21 @@ def test_an_owner_who_comes_back_mid_sweep_is_spared(api, monkeypatch):
 
 
 def test_one_failure_does_not_stop_the_others_or_lose_the_record(api, monkeypatch, caplog):
-    import app.main as main
+    import app.storage as storage
 
     _idle_web_owner(api, name="web-a")
     _idle_web_owner(api, name="web-b")
     _upload(api, "12345")
-    real = main._wipe_namespace
+    real = storage.wipe_namespace
 
     def wipe(state, settings, user_id):
         if user_id == "web-a":
             raise RuntimeError("chroma refused")
         return real(state, settings, user_id)
 
-    monkeypatch.setattr(main, "_wipe_namespace", wipe)
+    monkeypatch.setattr(storage, "wipe_namespace", wipe)
 
-    with caplog.at_level("WARNING", logger="app.main"):
+    with caplog.at_level("WARNING", logger="app.sweep"):
         body = _sweep(api, apply="true")
 
     assert body["swept"] == ["web-b"]
@@ -928,19 +929,19 @@ def test_startup_seeds_owners_that_predate_the_markers(tmp_path, fake_openai_emb
 
 def test_the_script_exits_one_when_an_owner_could_not_be_swept(api, via_api, monkeypatch, capsys):
     """A cron job that only reads the exit code has to notice a partial sweep."""
-    import app.main as main
+    import app.storage as storage
     import scripts.sweep as sweep_cli
 
     _idle_web_owner(api, name="web-a")
     _upload(api, "12345")
-    real = main._wipe_namespace
+    real = storage.wipe_namespace
 
     def wipe(state, settings, user_id):
         if user_id == "web-a":
             raise RuntimeError("chroma refused")
         return real(state, settings, user_id)
 
-    monkeypatch.setattr(main, "_wipe_namespace", wipe)
+    monkeypatch.setattr(storage, "wipe_namespace", wipe)
 
     code = sweep_cli.main(["--apply"])
 

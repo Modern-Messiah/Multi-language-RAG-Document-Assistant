@@ -1038,6 +1038,8 @@ subsequent search. To switch models, delete the collection directory
 ```
 ├── app/
 │   ├── main.py                 # API entry point, app factory, auth
+│   ├── sweep.py                # Which namespaces are idle, and removing them
+│   ├── storage.py              # An owner's uploads on disk, and wiping a namespace
 │   ├── config.py               # pydantic-settings Settings (single source of truth)
 │   ├── observability.py        # Request ids, access log, readiness checks
 │   ├── feedback.py             # The rating log and the reports read off it
@@ -1071,6 +1073,7 @@ subsequent search. To switch models, delete the collection directory
 ├── .github/workflows/ci.yml    # Lint + tests + docker build
 ├── data/
 │   ├── backups/                # Archives written by scripts/backup.py (git-ignored)
+│   ├── feedback/               # Collected ratings (git-ignored)
 │   ├── uploads/                # Raw file storage
 │   └── chroma_db/              # Persistent vector database
 ├── docker-compose.yml          # Production-shaped base
