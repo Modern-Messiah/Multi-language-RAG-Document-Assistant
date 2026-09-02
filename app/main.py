@@ -6,7 +6,6 @@ import re
 import secrets
 import threading
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import (
@@ -26,8 +25,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from openai import APITimeoutError, RateLimitError
 
-from app import byok, storage
-from app.activity import ActivityTracker, is_owner_name
+from app import byok, storage, sweep
+from app.activity import ActivityTracker
 from app.config import Settings, get_settings
 from app.feedback import FeedbackStorageFull, store_from_settings
 from app.humanize import human_size
@@ -37,12 +36,9 @@ from app.models.schemas import (
     DocumentListResponse,
     FeedbackRequest,
     FeedbackResponse,
-    OrphanEntry,
     QueryRequest,
     QueryResponse,
     QuotaUsage,
-    SweepEntry,
-    SweepFailure,
     SweepResponse,
     UploadResponse,
 )
@@ -863,20 +859,7 @@ def submit_feedback(request: Request, payload: FeedbackRequest):
 # =========================
 # Idle-namespace sweep
 # =========================
-# The web UI mints a fresh owner per browser session, so its documents are
-# orphaned the moment the tab closes and can never be reached again - and since
-# Stage 14 they are faithfully copied into every backup. This finds namespaces
-# nobody has touched in `idle_days` and, when asked twice, removes them.
-#
-# In-process rather than an offline script because ChromaDB must have a single
-# writer: the same reason backup and restore insist the backend is stopped.
-# Everything is a dry run unless apply=true, and apply refuses on its own in
-# the situations where the activity data is most likely to be wrong.
-
-# Below this, apply needs force. A typo in a cron line must not sweep
-# yesterday's users; a web session left open over a weekend is not abandoned.
-MIN_IDLE_DAYS_TO_APPLY = 7
-
+# The decisions live in app/sweep.py; what is left here is the HTTP shape.
 # Deliberately `def`: a full metadata scan of the collection plus a stat per
 # owner, none of which yields.
 @router.post("/maintenance/sweep", response_model=SweepResponse)
@@ -892,166 +875,18 @@ def sweep_idle_namespaces(
 ):
     state = request.app.state
     settings: Settings = state.settings
-    activity: ActivityTracker = state.activity
 
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(days=idle_days)
-
-    # Every name the data knows: owners with vectors, owners with a directory,
-    # owners with a marker. A name that could not be a user_id is reported and
-    # never acted on - ".activity" itself is one, and so is whatever an
-    # operator or a filesystem left there.
     try:
-        with_vectors = set(state.embeddings.list_owners())
-    except Exception:
-        logger.exception("Could not enumerate owners")
+        plan = sweep.plan(state, settings, idle_days, prefix, apply, force)
+    except sweep.SweepError:
+        # Already logged with its cause; /maintenance/sweep says no more than
+        # every other endpoint does about the store being unreadable.
         raise HTTPException(status_code=503, detail="Vector store unavailable")
-    names = with_vectors | activity.owner_dirs() | activity.known_owners()
 
-    foreign = sorted(name for name in names if not is_owner_name(name))
-    valid = sorted(name for name in names if is_owner_name(name))
+    # A refused plan is still a report: the operator has to see why without
+    # anything having been at risk.
+    outcome = None
+    if apply and not plan.refused:
+        outcome = sweep.execute(state, settings, plan)
 
-    # "Anyone active at all" is judged over every owner, not only the prefix:
-    # after a restore or a long stop everyone looks idle at once, and that is
-    # stale data, not a mass departure. A prefix sweep of web sessions while
-    # Telegram users are busy is fine; a sweep where nobody has been seen is
-    # the one that needs a second look.
-    dated = {name: activity.last_seen(name) for name in valid}
-    known_dates = [seen for seen in dated.values() if seen is not None]
-    newest_seen = max(known_dates) if known_dates else None
-    anyone_active = newest_seen is not None and newest_seen >= cutoff
-
-    candidates, empty, unknown, orphans = [], [], [], []
-    for owner in valid:
-        # Orphan files are looked for under EVERY owner, not only the prefix.
-        # They are most likely under the stable ids the default prefix excludes -
-        # left by a crash between write and index, or by an older /clear that
-        # deleted vectors only - and reporting them costs one lookup. Removing
-        # them stays inside the prefix: an operator who asked to sweep web
-        # sessions should not have files deleted elsewhere.
-        in_scope = owner.startswith(prefix)
-        try:
-            held = {d["file_hash"] for d in state.embeddings.list_documents(owner)}
-        except Exception:
-            logger.exception("Could not list documents for %s during sweep", owner)
-            raise HTTPException(status_code=503, detail="Vector store unavailable")
-
-        files = storage.stored_files(settings, owner)
-        backed = sum(storage.size_of(p) for p in files if p.name.split("_", 1)[0] in held)
-        stray = [p for p in files if p.name.split("_", 1)[0] not in held]
-        if stray:
-            orphans.append(OrphanEntry(
-                user_id=owner, files=len(stray),
-                bytes=sum(storage.size_of(p) for p in stray),
-                in_scope=in_scope,
-            ))
-
-        if not in_scope:
-            continue
-
-        seen = dated[owner]
-        entry = SweepEntry(
-            user_id=owner, documents=len(held), bytes=backed,
-            last_seen=seen.isoformat() if seen else None,
-        )
-        if seen is None:
-            unknown.append(owner)
-        elif seen >= cutoff:
-            # Inclusive: exactly idle_days is not yet idle. No test pins the
-            # difference between >= and >, because cutoff is derived from this
-            # request's own clock and no marker's mtime can be made equal to
-            # it; the choice is here so it is at least deliberate.
-            continue  # active: not this sweep's business
-        elif held or files:
-            candidates.append(entry)
-        else:
-            # A marker or an empty directory left after every document was
-            # deleted. Nothing to lose, so cleaned without ceremony.
-            empty.append(entry)
-
-    refused = None
-    if apply and not force:
-        if not prefix:
-            refused = (
-                "apply without a prefix would sweep every tenant, stable Telegram "
-                "ids included. Pass prefix=web- for the web UI's per-session "
-                "namespaces, or force=true to mean it."
-            )
-        elif idle_days < MIN_IDLE_DAYS_TO_APPLY:
-            refused = (
-                f"apply with idle_days below {MIN_IDLE_DAYS_TO_APPLY} would sweep "
-                "namespaces a returning user still expects. Pass force=true to mean it."
-            )
-        elif activity.touch_failures:
-            refused = (
-                f"{activity.touch_failures} activity update(s) failed since startup, "
-                "so some live owners may look idle. Fix the volume (it is probably "
-                "full), restart, then sweep - or pass force=true."
-            )
-        elif not anyone_active and (candidates or empty):
-            refused = (
-                f"no owner at all has been active in the last {idle_days} days, which "
-                "looks like stale activity data (a restore, a long stop) rather than "
-                "everyone leaving. Pass force=true if it really is everyone."
-            )
-
-    swept, became_active, failed = [], [], []
-    orphans_removed = 0
-    if apply and not refused:
-        for entry in candidates + empty:
-            owner = entry.user_id
-            try:
-                with state.upload_locks.for_owner(owner):
-                    # Re-read under the lock: the owner may have come back while
-                    # the list above was being built.
-                    seen_now = activity.last_seen(owner)
-                    if seen_now is not None and seen_now >= cutoff:
-                        became_active.append(owner)
-                        continue
-                    # Logged BEFORE deleting, so a crash or a failure mid-loop
-                    # still leaves a record of what was about to go; the response
-                    # only exists if the loop ends. The re-check above comes
-                    # first so an owner who came back is not logged as swept.
-                    logger.warning(
-                        "Sweeping idle namespace user_id=%s documents=%d bytes=%d last_seen=%s",
-                        owner, entry.documents, entry.bytes, entry.last_seen,
-                    )
-                    storage.wipe_namespace(state, settings, owner)
-                swept.append(owner)
-            except Exception as exc:
-                logger.exception("Could not sweep %s", owner)
-                failed.append(SweepFailure(user_id=owner, error=f"{type(exc).__name__}: {exc}"[:200]))
-
-        for orphan in orphans:
-            if not orphan.in_scope or orphan.user_id in swept:
-                continue  # out of scope, or already gone with the namespace
-            try:
-                with state.upload_locks.for_owner(orphan.user_id):
-                    # Recomputed under the lock: an upload since the listing may
-                    # have given a file its vectors.
-                    held = {d["file_hash"] for d in state.embeddings.list_documents(orphan.user_id)}
-                    for path in storage.stored_files(settings, orphan.user_id):
-                        if path.name.split("_", 1)[0] not in held:
-                            path.unlink()
-                            orphans_removed += 1
-            except Exception as exc:
-                logger.exception("Could not remove orphan files for %s", orphan.user_id)
-                failed.append(SweepFailure(user_id=orphan.user_id, error=f"{type(exc).__name__}: {exc}"[:200]))
-
-    return SweepResponse(
-        idle_days=idle_days,
-        prefix=prefix,
-        dry_run=not (apply and not refused),
-        cutoff=cutoff.isoformat(),
-        newest_seen=newest_seen.isoformat() if newest_seen else None,
-        candidates=candidates,
-        empty=empty,
-        unknown=unknown,
-        foreign=foreign,
-        orphans=orphans,
-        swept=swept,
-        became_active=became_active,
-        failed=failed,
-        orphans_removed=orphans_removed,
-        refused=refused,
-    )
+    return sweep.report(plan, outcome)

@@ -14,7 +14,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.activity import ACTIVITY_DIRNAME, ActivityTracker, is_owner_name
-from app.main import MIN_IDLE_DAYS_TO_APPLY, USER_ID_PATTERN
+from app.main import USER_ID_PATTERN
+from app.sweep import MIN_IDLE_DAYS_TO_APPLY
 
 TEXT = b"Annual leave for an engineer is twenty eight calendar days."
 OTHER = b"Sick leave is paid from the first day of absence, on a certificate."
@@ -625,7 +626,7 @@ def test_deletion_is_logged_before_it_happens(api, caplog):
     _idle_web_owner(api)
     _upload(api, "12345")
 
-    with caplog.at_level("WARNING", logger="app.main"):
+    with caplog.at_level("WARNING", logger="app.sweep"):
         _sweep(api, apply="true")
 
     lines = [r.getMessage() for r in caplog.records if "Sweeping" in r.getMessage()]
@@ -680,7 +681,7 @@ def test_one_failure_does_not_stop_the_others_or_lose_the_record(api, monkeypatc
 
     monkeypatch.setattr(storage, "wipe_namespace", wipe)
 
-    with caplog.at_level("WARNING", logger="app.main"):
+    with caplog.at_level("WARNING", logger="app.sweep"):
         body = _sweep(api, apply="true")
 
     assert body["swept"] == ["web-b"]
