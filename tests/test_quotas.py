@@ -499,16 +499,16 @@ def test_a_file_that_vanishes_mid_scan_is_worth_nothing_not_a_500(limited, monke
     """Every caller lists a directory and then stats what it found, and a
     delete or a retired revision can remove a file in between - the listing is
     not always under the owner's lock. A vanished file counts as zero bytes."""
-    import app.main as main
+    import app.storage as storage
 
     uploaded = _upload(limited, "one.txt", ONE).json()
-    real = main._stored_files
+    real = storage.stored_files
 
     def with_a_ghost(settings, user_id):
         ghost = settings.upload_dir / user_id / f"{uploaded['file_hash']}_vanished.txt"
         return [*real(settings, user_id), ghost]
 
-    monkeypatch.setattr(main, "_stored_files", with_a_ghost)
+    monkeypatch.setattr(storage, "stored_files", with_a_ghost)
 
     quota = _quota(limited)
 
@@ -517,16 +517,16 @@ def test_a_file_that_vanishes_mid_scan_is_worth_nothing_not_a_500(limited, monke
 
 
 def test_a_vanished_orphan_does_not_break_the_sweep(limited, monkeypatch):
-    import app.main as main
+    import app.storage as storage
 
     _upload(limited, "one.txt", ONE)
-    real = main._stored_files
+    real = storage.stored_files
 
     def with_a_ghost(settings, user_id):
         ghost = settings.upload_dir / user_id / ("f" * 16 + "_vanished.txt")
         return [*real(settings, user_id), ghost]
 
-    monkeypatch.setattr(main, "_stored_files", with_a_ghost)
+    monkeypatch.setattr(storage, "stored_files", with_a_ghost)
 
     response = limited.post("/maintenance/sweep", params={"idle_days": 30, "prefix": ""})
 

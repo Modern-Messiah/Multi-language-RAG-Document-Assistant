@@ -4,7 +4,6 @@ import logging
 import os
 import re
 import secrets
-import shutil
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -27,7 +26,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 from openai import APITimeoutError, RateLimitError
 
-from app import byok
+from app import byok, storage
 from app.activity import ActivityTracker, is_owner_name
 from app.config import Settings, get_settings
 from app.feedback import FeedbackStorageFull, store_from_settings
@@ -454,7 +453,7 @@ def _retire_older_revisions(state, settings, source: str, keep_hash: str, user_i
     for old_hash in stale:
         try:
             state.embeddings.delete_by_file_hash(old_hash, user_id)
-            _remove_stored_file(settings, user_id, old_hash)
+            storage.remove_stored_file(settings, user_id, old_hash)
             removed = True
             logger.info(
                 "Replaced revision %s of %s for user_id=%s", old_hash, source, user_id
@@ -464,15 +463,6 @@ def _retire_older_revisions(state, settings, source: str, keep_hash: str, user_i
             # not a failed upload.
             logger.exception("Could not retire revision %s of %s", old_hash, source)
     return removed
-
-
-def _remove_stored_file(settings: Settings, user_id: str, file_hash: str) -> None:
-    """Delete the raw upload whose name starts with this content hash."""
-    owner_dir = settings.upload_dir / user_id
-    if not owner_dir.is_dir():
-        return
-    for path in owner_dir.glob(f"{file_hash}_*"):
-        path.unlink(missing_ok=True)
 
 
 def _caller_model(request: Request) -> tuple:
@@ -535,30 +525,9 @@ def _owner_usage(state, settings: Settings, user_id: str, exclude_hashes=()) -> 
     }
 
     return len(held), sum(
-        _size_of(path) for path in _stored_files(settings, user_id)
+        storage.size_of(path) for path in storage.stored_files(settings, user_id)
         if path.name.split("_", 1)[0] in held
     )
-
-
-def _stored_files(settings: Settings, user_id: str) -> list:
-    owner_dir = settings.upload_dir / user_id
-    if not owner_dir.is_dir():
-        return []
-    return [path for path in owner_dir.iterdir() if path.is_file()]
-
-
-def _size_of(path) -> int:
-    """Bytes on disk, or 0 if the file is already gone.
-
-    Every caller lists a directory and then stats what it found, and a delete
-    or a retired revision can remove a file in between - the listing is not
-    always under the owner's lock. A vanished file is worth nothing towards a
-    quota, not a 500.
-    """
-    try:
-        return path.stat().st_size
-    except OSError:
-        return 0
 
 
 def _quota_problem(settings: Settings, documents: int, total_bytes: int,
@@ -675,36 +644,14 @@ def clear_documents(request: Request, user_id: str = USER_ID_QUERY):
 
 
 def _clear_namespace(state, settings: Settings, user_id: str) -> None:
-    """Remove everything one owner has: vectors, raw uploads, activity marker.
+    """Take the owner's lock, then remove everything they have.
 
-    Shared by /clear and the idle-namespace sweep so the two cannot drift
-    into deleting different things. Raises if the vectors cannot be deleted;
-    a leftover file is logged, since the data the user cares about is gone.
-
-    Takes the owner's upload lock. Without it a sweep could run between an
-    upload's write_bytes and its add_documents and remove the file from under
-    it - the upload then answers 200 with nothing stored, or a spurious 400.
-    The exact owner a sweep targets is one who has just come back.
+    Shared by /clear and the idle-namespace sweep so the two cannot drift into
+    deleting different things - the sweep takes the same lock itself, because
+    it has a re-check to do inside it.
     """
     with state.upload_locks.for_owner(user_id):
-        _wipe_namespace(state, settings, user_id)
-
-
-def _wipe_namespace(state, settings: Settings, user_id: str) -> None:
-    """_clear_namespace without the lock, for a caller that already holds it."""
-    state.embeddings.delete_documents(filter={"user_id": user_id})
-
-    # Drop the raw uploads too. Deleting only the vectors left every file the
-    # user ever sent on disk forever - unbounded volume growth, and "cleared"
-    # documents that are still sitting there.
-    # user_id is validated ([A-Za-z0-9_-]{1,64}), so it cannot escape upload_dir.
-    owner_dir = settings.upload_dir / user_id
-    if owner_dir.is_dir():
-        shutil.rmtree(owner_dir, ignore_errors=True)
-        if owner_dir.exists():
-            logger.warning("Could not fully remove upload dir for %s", user_id)
-
-    state.activity.forget(user_id)
+        storage.wipe_namespace(state, settings, user_id)
 
 
 def _sse(event: dict) -> str:
@@ -855,7 +802,7 @@ def delete_document(
     if not removed:
         raise HTTPException(status_code=404, detail="No such document")
 
-    _remove_stored_file(settings, user_id, file_hash)
+    storage.remove_stored_file(settings, user_id, file_hash)
     state.activity.touch(user_id)
 
     return DeleteResponse(
@@ -989,13 +936,13 @@ def sweep_idle_namespaces(
             logger.exception("Could not list documents for %s during sweep", owner)
             raise HTTPException(status_code=503, detail="Vector store unavailable")
 
-        files = _stored_files(settings, owner)
-        backed = sum(_size_of(p) for p in files if p.name.split("_", 1)[0] in held)
+        files = storage.stored_files(settings, owner)
+        backed = sum(storage.size_of(p) for p in files if p.name.split("_", 1)[0] in held)
         stray = [p for p in files if p.name.split("_", 1)[0] not in held]
         if stray:
             orphans.append(OrphanEntry(
                 user_id=owner, files=len(stray),
-                bytes=sum(_size_of(p) for p in stray),
+                bytes=sum(storage.size_of(p) for p in stray),
                 in_scope=in_scope,
             ))
 
@@ -1069,7 +1016,7 @@ def sweep_idle_namespaces(
                         "Sweeping idle namespace user_id=%s documents=%d bytes=%d last_seen=%s",
                         owner, entry.documents, entry.bytes, entry.last_seen,
                     )
-                    _wipe_namespace(state, settings, owner)
+                    storage.wipe_namespace(state, settings, owner)
                 swept.append(owner)
             except Exception as exc:
                 logger.exception("Could not sweep %s", owner)
@@ -1083,7 +1030,7 @@ def sweep_idle_namespaces(
                     # Recomputed under the lock: an upload since the listing may
                     # have given a file its vectors.
                     held = {d["file_hash"] for d in state.embeddings.list_documents(orphan.user_id)}
-                    for path in _stored_files(settings, orphan.user_id):
+                    for path in storage.stored_files(settings, orphan.user_id):
                         if path.name.split("_", 1)[0] not in held:
                             path.unlink()
                             orphans_removed += 1
