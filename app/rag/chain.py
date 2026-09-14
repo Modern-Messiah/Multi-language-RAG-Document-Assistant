@@ -106,6 +106,8 @@ class RAGChain:
         max_retries: Optional[int] = None,
         base_url: str = "",
         tracer=None,
+        reranker=None,
+        retrieval_candidates: Optional[int] = None,
     ):
         """
         Args:
@@ -117,6 +119,8 @@ class RAGChain:
                 pydantic-settings reads .env WITHOUT exporting it into
                 os.environ, so relying on the env var alone made a plain
                 `uvicorn app.main:app` run with only a .env file fail at startup.
+            reranker: optional BaseReranker instance for cross-encoder re-ranking
+            retrieval_candidates: number of candidate chunks to retrieve before reranking
         """
         self.vectorstore = vectorstore
         self.model = model or os.getenv("MODEL_NAME", "gpt-4o-mini")
@@ -138,6 +142,12 @@ class RAGChain:
         self.embeddings_manager = embeddings_manager
         self._warned_about_mmr = False
         self.tracer = tracer or NoOpTracer()
+        self.reranker = reranker
+        self.retrieval_candidates = int(
+            retrieval_candidates
+            if retrieval_candidates is not None
+            else os.getenv("RETRIEVAL_CANDIDATES", 20)
+        )
 
         if client is not None:
             self.client = client
@@ -196,7 +206,7 @@ class RAGChain:
     # =========================
     # Retrieval
     # =========================
-    def _retrieve(self, question: str, filter_dict: dict) -> List[Document]:
+    def _retrieve(self, question: str, filter_dict: dict, k: Optional[int] = None) -> List[Document]:
         """Fetch candidates, dropping any that are not actually relevant.
 
         Plain similarity_search returns k chunks whether or not anything in the
@@ -208,14 +218,15 @@ class RAGChain:
         Scores are logged on every query even when filtering is off, so the
         threshold can be chosen from data rather than guessed.
         """
+        effective_k = k if k is not None else self.top_k
         if self._mmr_enabled():
-            return self._retrieve_diverse(question, filter_dict)
+            return self._retrieve_diverse(question, filter_dict, k=effective_k)
 
-        scored = self._search_with_scores(question, filter_dict)
+        scored = self._search_with_scores(question, filter_dict, k=effective_k)
         if scored is None:
             # A vector store without the scored API (or an injected double).
             return self.vectorstore.similarity_search(
-                question, k=self.top_k, filter=filter_dict
+                question, k=effective_k, filter=filter_dict
             )
 
         space = self._index_space()
@@ -282,14 +293,15 @@ class RAGChain:
             return False
         return True
 
-    def _retrieve_diverse(self, question: str, filter_dict: dict) -> List[Document]:
+    def _retrieve_diverse(self, question: str, filter_dict: dict, k: Optional[int] = None) -> List[Document]:
         """Threshold first, then pick a diverse subset of what survived.
 
         The order matters: MMR would otherwise spend one of its k slots on a
         chunk that is merely different, rather than different *and* relevant.
         """
+        effective_k = k if k is not None else self.top_k
         owner = filter_dict["user_id"]
-        fetch_k = max(self.top_k, self.top_k * MMR_FETCH_MULTIPLIER)
+        fetch_k = max(effective_k, effective_k * MMR_FETCH_MULTIPLIER)
         candidates = self.embeddings_manager.search_candidates(question, fetch_k, owner)
         if not candidates:
             return []
@@ -327,15 +339,16 @@ class RAGChain:
                 )
             scored = kept
 
-        return select_mmr(scored, self.top_k, self.mmr_lambda)
+        return select_mmr(scored, effective_k, self.mmr_lambda)
 
-    def _search_with_scores(self, question: str, filter_dict: dict):
+    def _search_with_scores(self, question: str, filter_dict: dict, k: Optional[int] = None):
         """Scored search, or None when the store cannot do it."""
         search = getattr(self.vectorstore, "similarity_search_with_score", None)
         if search is None:
             return None
+        effective_k = k if k is not None else self.top_k
         try:
-            return search(question, k=self.top_k, filter=filter_dict)
+            return search(question, k=effective_k, filter=filter_dict)
         except TypeError:
             # A double whose signature predates the filter argument.
             return None
@@ -450,15 +463,28 @@ class RAGChain:
             if src in seen:
                 continue
             seen.add(src)
-            sources.append({
+            entry = {
                 "id": len(sources) + 1,
                 "source": src,
                 "preview": doc.page_content[:200],
-            })
+            }
+            if "rerank_score" in doc.metadata:
+                entry["rerank_score"] = doc.metadata["rerank_score"]
+            sources.append(entry)
 
         return sources
 
-    def _prepare(self, question, language, user_id, history, client=None, model=None, trace=None):
+    def _prepare(
+        self,
+        question,
+        language,
+        user_id,
+        history,
+        client=None,
+        model=None,
+        trace=None,
+        reranker=None,
+    ):
         """Retrieve and build the chat request.
 
         Shared by ask() and ask_stream() so the two cannot drift: a prompt
@@ -485,14 +511,43 @@ class RAGChain:
             condense_span = trace_handle.span("query_condense", input={"question": question})
             condense_span.end(output={"rewritten": search_query})
 
-        retrieval_span = trace_handle.span("retrieval", input={"query": search_query})
-        docs = self._retrieve(search_query, filter_dict)
+        active_reranker = reranker if reranker is not None else self.reranker
+        fetch_k = (
+            max(self.top_k, self.retrieval_candidates)
+            if active_reranker
+            else self.top_k
+        )
+
+        retrieval_span = trace_handle.span("retrieval", input={"query": search_query, "k": fetch_k})
+        docs = self._retrieve(search_query, filter_dict, k=fetch_k)
         retrieval_span.end(
             output={
                 "count": len(docs),
                 "sources": [d.metadata.get("source", "unknown") for d in docs],
             }
         )
+
+        if docs and active_reranker:
+            rerank_span = trace_handle.span(
+                "rerank",
+                input={
+                    "query": search_query,
+                    "candidates_count": len(docs),
+                    "top_n": self.top_k,
+                },
+            )
+            docs = active_reranker.rerank(search_query, docs, top_n=self.top_k)
+            rerank_span.end(
+                output={
+                    "count": len(docs),
+                    "sources": [d.metadata.get("source", "unknown") for d in docs],
+                    "scores": [
+                        d.metadata.get("rerank_score")
+                        for d in docs
+                        if "rerank_score" in d.metadata
+                    ],
+                }
+            )
 
         if not docs:
             return None, []
@@ -545,6 +600,7 @@ Answer:
         client=None,
         model=None,
         trace=None,
+        reranker=None,
     ) -> Dict:
         """Answer one question.
 
@@ -554,7 +610,7 @@ Answer:
         """
         trace_handle = trace or NoOpTraceHandle()
         request, sources = self._prepare(
-            question, language, user_id, history, client, model, trace=trace_handle
+            question, language, user_id, history, client, model, trace=trace_handle, reranker=reranker
         )
 
         if request is None:
@@ -614,6 +670,7 @@ Answer:
         client=None,
         model=None,
         trace=None,
+        reranker=None,
     ):
         """Yield the answer as it is generated.
 
@@ -630,7 +687,7 @@ Answer:
         """
         trace_handle = trace or NoOpTraceHandle()
         request, sources = self._prepare(
-            question, language, user_id, history, client, model, trace=trace_handle
+            question, language, user_id, history, client, model, trace=trace_handle, reranker=reranker
         )
 
         if request is None:

@@ -183,6 +183,8 @@ async def lifespan(app: FastAPI):
         else:
             server_model = normalize_model_name("deepseek", server_model)
 
+    from app.rag.reranker import get_reranker
+    app.state.reranker = get_reranker(settings)
     app.state.rag_chain = RAGChain(
         app.state.vectorstore,
         model=server_model,
@@ -198,6 +200,8 @@ async def lifespan(app: FastAPI):
         max_retries=settings.openai_max_retries,
         base_url=llm_url,
         tracer=app.state.tracer,
+        reranker=app.state.reranker,
+        retrieval_candidates=settings.retrieval_candidates,
     )
     yield
     app.state.tracer.flush()
@@ -491,6 +495,14 @@ def _caller_model(request: Request) -> tuple:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+def _caller_reranker(request: Request):
+    """The reranker this caller asked for via BYOK headers, if any."""
+    try:
+        return byok.wanted_reranker(request.headers, request.app.state.settings)
+    except byok.BringYourOwnKeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 # =========================
 # Per-owner quotas
 # =========================
@@ -593,6 +605,7 @@ def _quota_usage(state, settings: Settings, user_id: str) -> QuotaUsage:
 def query_rag(request: Request, payload: QueryRequest):
     settings: Settings = request.app.state.settings
     key, model, provider = _caller_model(request)
+    caller_reranker = _caller_reranker(request)
     client = byok.client_for(key, settings, provider) if key else None
 
     tracer = getattr(request.app.state, "tracer", None)
@@ -617,6 +630,7 @@ def query_rag(request: Request, payload: QueryRequest):
             client=client,
             model=model,
             trace=trace,
+            reranker=caller_reranker,
         )
     except RateLimitError as exc:
         if client:
@@ -701,6 +715,7 @@ def query_rag_stream(request: Request, payload: QueryRequest):
     """
     settings: Settings = request.app.state.settings
     key, model, provider = _caller_model(request)
+    caller_reranker = _caller_reranker(request)
     client = byok.client_for(key, settings, provider) if key else None
 
     tracer = getattr(request.app.state, "tracer", None)
@@ -724,6 +739,7 @@ def query_rag_stream(request: Request, payload: QueryRequest):
         client=client,
         model=model,
         trace=trace,
+        reranker=caller_reranker,
     )
 
     try:

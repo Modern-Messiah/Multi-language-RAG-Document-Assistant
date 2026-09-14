@@ -44,6 +44,10 @@ KEY_HEADER = "X-Model-Key"
 MODEL_HEADER = "X-Model"
 PROVIDER_HEADER = "X-Model-Provider"
 
+RERANKER_PROVIDER_HEADER = "X-Reranker-Provider"
+RERANKER_KEY_HEADER = "X-Reranker-Key"
+RERANKER_MODEL_HEADER = "X-Reranker-Model"
+
 # Where each provider's OpenAI-compatible chat completions live. The client
 # library appends "chat/completions", so these are base URLs.
 #
@@ -220,3 +224,31 @@ def close_quietly(client) -> None:
         client.close()
     except Exception:
         logger.warning("Could not close the per-request model client")
+
+
+def wanted_reranker(headers, settings=None):
+    """Return an overridden reranker if requested via BYOK headers, else None."""
+    provider = (headers.get(RERANKER_PROVIDER_HEADER) or "").strip().lower()
+    if not provider:
+        return None
+
+    if provider not in ("none", "flashrank", "cohere"):
+        raise BringYourOwnKeyError(
+            f"Unknown reranker provider '{provider}'. Supported: none, flashrank, cohere."
+        )
+
+    key = (headers.get(RERANKER_KEY_HEADER) or "").strip()
+    if provider == "cohere" and not key and not getattr(settings, "reranker_api_key", ""):
+        raise BringYourOwnKeyError(
+            "Cohere reranker requires an API key in X-Reranker-Key header."
+        )
+
+    model = (headers.get(RERANKER_MODEL_HEADER) or "").strip()
+    from app.rag.reranker import get_reranker
+
+    return get_reranker(
+        settings,
+        provider_override=provider,
+        api_key_override=key or None,
+        model_override=model or None,
+    )
