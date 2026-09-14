@@ -71,17 +71,34 @@ class BackendClient:
         )
         return data
 
-    def query(self, user_id: str, question: str, trace_id: str, language: str = "Auto") -> dict:
+    def query(
+        self,
+        user_id: str,
+        question: str,
+        trace_id: str,
+        language: str = "Auto",
+        provider: str = None,
+        model: str = None,
+        model_key: str = None,
+    ) -> dict:
+        headers = {"X-Request-ID": trace_id}
+        if provider:
+            headers["X-Model-Provider"] = provider
+        if model:
+            headers["X-Model"] = model
+        if model_key:
+            headers["X-Model-Key"] = model_key
+
         body = json.dumps(
             {"question": question, "language": language, "user_id": user_id}
         ).encode("utf-8")
-        data, headers = self._request(
+        data, _ = self._request(
             "POST",
             "/query",
             None,
             body,
             "application/json",
-            extra_headers={"X-Request-ID": trace_id},
+            extra_headers=headers,
         )
         return data
 
@@ -153,24 +170,35 @@ def run_experiment(
     dataset_name: str = DATASET_NAME,
     run_name: Optional[str] = None,
     top_k: int = 3,
+    limit: Optional[int] = None,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    model_key: Optional[str] = None,
     keep_tenant: bool = False,
 ):
     dataset = sync_dataset_items(langfuse_client, dataset_name)
     if not run_name:
-        run_name = f"eval-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        model_tag = model or "default"
+        run_name = f"eval-{model_tag}-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
     tenant_id = f"eval-{uuid.uuid4().hex[:12]}"
     print(f"\n🚀 Starting Langfuse Experiment Run: '{run_name}'")
+    if provider:
+        print(f"  Provider: {provider} | Model: {model or 'default'}")
     print(f"Uploading {len(CORPUS)} documents to tenant: {tenant_id}")
     for filename, text in CORPUS.items():
         res = backend.upload(tenant_id, filename, text)
         print(f"  ✓ {filename}: {res.get('chunks', 0)} chunk(s)")
 
-    print(f"\nEvaluating {len(dataset.items)} dataset items...")
+    items = dataset.items
+    if limit:
+        items = items[:limit]
+
+    print(f"\nEvaluating {len(items)} dataset items...")
     eval_cases = []
     start_all = time.time()
 
-    for idx, item in enumerate(dataset.items, start=1):
+    for idx, item in enumerate(items, start=1):
         q = item.input.get("question") if isinstance(item.input, dict) else str(item.input)
         expected_sources = (
             item.expected_output.get("expected_sources", [])
@@ -182,9 +210,16 @@ def run_experiment(
         trace_id = uuid.uuid4().hex[:16]
         t0 = time.perf_counter()
         try:
-            answer = backend.query(tenant_id, q, trace_id=trace_id)
+            answer = backend.query(
+                tenant_id,
+                q,
+                trace_id=trace_id,
+                provider=provider,
+                model=model,
+                model_key=model_key,
+            )
         except Exception as err:
-            print(f"  [{idx}/{len(dataset.items)}] ERROR: {err}")
+            print(f"  [{idx}/{len(items)}] ERROR: {err}")
             continue
         latency_ms = (time.perf_counter() - t0) * 1000.0
 
@@ -197,14 +232,15 @@ def run_experiment(
         rec = recall_at_k(expected_sources, retrieved_sources, top_k) if not is_negative else 1.0
 
         hit_label = "PASS" if hit else "FAIL"
-        print(f"  [{idx}/{len(dataset.items)}] [{hit_label}] {q[:50]:52} -> {retrieved_sources} ({latency_ms:.0f}ms)")
+        print(f"  [{idx}/{len(items)}] [{hit_label}] {q[:50]:52} -> {retrieved_sources} ({latency_ms:.0f}ms)")
 
         # Link trace to Langfuse dataset item and run
         item.link(
             trace_or_observation=None,
             trace_id=trace_id,
             run_name=run_name,
-            run_description=f"Evaluation run {run_name}",
+            run_description=f"Evaluation run {run_name} (model={model or 'default'})",
+            run_metadata={"provider": provider or "default", "model": model or "default"},
         )
 
         # Log metrics to Langfuse
@@ -261,6 +297,10 @@ def main(argv=None):
     parser.add_argument("--dataset", default=DATASET_NAME, help="Dataset name in Langfuse")
     parser.add_argument("--run-name", default=None, help="Name of experiment run")
     parser.add_argument("--top-k", type=int, default=3, help="Top-K for precision and recall")
+    parser.add_argument("--limit", type=int, default=None, help="Limit number of dataset items to evaluate")
+    parser.add_argument("--provider", default=None, help="Model provider (e.g. deepseek, openai, anthropic)")
+    parser.add_argument("--model", default=None, help="Model name (e.g. deepseek-flash, gpt-4o)")
+    parser.add_argument("--model-key", default=None, help="API key for the custom provider")
     parser.add_argument("--keep", action="store_true", help="Keep scratch tenant documents")
     parser.add_argument("--sync-only", action="store_true", help="Only sync dataset items without running")
     args = parser.parse_args(argv)
@@ -278,6 +318,10 @@ def main(argv=None):
             dataset_name=args.dataset,
             run_name=args.run_name,
             top_k=args.top_k,
+            limit=args.limit,
+            provider=args.provider,
+            model=args.model,
+            model_key=args.model_key,
             keep_tenant=args.keep,
         )
     except urllib.error.URLError as err:
