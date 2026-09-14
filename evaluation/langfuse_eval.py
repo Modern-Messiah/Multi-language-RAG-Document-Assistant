@@ -265,6 +265,13 @@ def run_experiment(
         expected_sources = item_expectations[idx - 1]
         is_negative = not bool(expected_sources)
 
+        meta_filter = None
+        if isinstance(item.metadata, dict) and item.metadata.get("company"):
+            from app.rag.metadata_extractor import normalize_company
+            comp_norm = normalize_company(item.metadata["company"])
+            if comp_norm:
+                meta_filter = {"company": comp_norm}
+
         trace_id = uuid.uuid4().hex[:16]
         t0 = time.perf_counter()
         try:
@@ -278,6 +285,7 @@ def run_experiment(
                 reranker_provider=reranker,
                 reranker_key=reranker_key,
                 reranker_model=reranker_model,
+                metadata_filter=meta_filter,
             )
         except Exception as err:
             print(f"  [{idx}/{len(items)}] ERROR: {err}")

@@ -82,6 +82,11 @@ def test_extract_query_metadata_from_questions():
     assert m5.get("company") == "WALMART"
     assert "year" not in m5
 
+    # Multi-word alias company names
+    assert extract_query_metadata("What was Boeing's revenue in 2022?").get("company") == "BOEING"
+    assert extract_query_metadata("Did American Express increase dividends in 2021?").get("company") == "AMERICANEXPRESS"
+    assert extract_query_metadata("What is the restructuring cost for AES Corporation?").get("company") == "AES"
+
 
 # =========================
 # Unit: Chroma Filter Builder

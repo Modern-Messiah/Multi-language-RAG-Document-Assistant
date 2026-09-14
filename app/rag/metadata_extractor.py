@@ -18,43 +18,63 @@ FY_YEAR_PATTERN = re.compile(r"\bFY\s*(?:20)?(\d{2,4})\b", re.IGNORECASE)
 QUARTER_PATTERN = re.compile(r"\b(Q[1-4]|1Q|2Q|3Q|4Q)\b", re.IGNORECASE)
 DOC_TYPE_PATTERN = re.compile(r"\b(10-?K|10-?Q|8-?K|EARNINGS|ANNUAL\s+REPORT)\b", re.IGNORECASE)
 
-# Common known company names and tickers in financial & general domains
-KNOWN_COMPANIES = {
-    "WALMART",
-    "VERIZON",
-    "PFIZER",
-    "ULTABEAUTY",
-    "ULTA",
-    "AMCOR",
-    "ADOBE",
-    "3M",
-    "APPLE",
-    "MICROSOFT",
-    "AMAZON",
-    "GOOGLE",
-    "TESLA",
-    "META",
-    "NETFLIX",
-    "NVIDIA",
-    "BESTBUY",
-    "CORNING",
-    "PEPSICO",
-    "AMD",
-    "MGMRESORTS",
-    "CVSHEALTH",
-    "JOHNSON_JOHNSON",
-    "JNJ",
+# Common known company names, tickers and aliases in financial & general domains
+COMPANY_ALIASES: Dict[str, List[str]] = {
+    "3M": ["3M", "MMM", "MINNESOTA MINING"],
+    "ACTIVISIONBLIZZARD": ["ACTIVISION BLIZZARD", "ACTIVISION"],
+    "ADOBE": ["ADOBE"],
+    "AES": ["AES CORPORATION", "AES CORP", "AES"],
+    "AMAZON": ["AMAZON", "AMZN"],
+    "AMCOR": ["AMCOR"],
+    "AMD": ["ADVANCED MICRO DEVICES", "AMD"],
+    "AMERICANEXPRESS": ["AMERICAN EXPRESS", "AMEX"],
+    "AMERICANWATERWORKS": ["AMERICAN WATER WORKS", "AMERICAN WATER"],
+    "APPLE": ["APPLE", "AAPL"],
+    "BESTBUY": ["BEST BUY"],
+    "BLOCK": ["BLOCK", "SQUARE"],
+    "BOEING": ["BOEING"],
+    "COCACOLA": ["COCA-COLA", "COCA COLA", "KO"],
+    "CORNING": ["CORNING"],
+    "COSTCO": ["COSTCO"],
+    "CVSHEALTH": ["CVS HEALTH", "CVS"],
+    "FOOTLOCKER": ["FOOT LOCKER"],
+    "GENERALMILLS": ["GENERAL MILLS"],
+    "GOOGLE": ["GOOGLE", "ALPHABET"],
+    "JOHNSON_JOHNSON": ["JOHNSON & JOHNSON", "JOHNSON AND JOHNSON", "JOHNSONJOHNSON", "JNJ"],
+    "JPMORGAN": ["JPMORGAN", "JP MORGAN", "JPM"],
+    "KRAFTHEINZ": ["KRAFT HEINZ", "KRAFT"],
+    "LOCKHEEDMARTIN": ["LOCKHEED MARTIN", "LOCKHEED"],
+    "META": ["META", "FACEBOOK"],
+    "MGMRESORTS": ["MGM RESORTS", "MGM"],
+    "MICROSOFT": ["MICROSOFT", "MSFT"],
+    "NETFLIX": ["NETFLIX", "NFLX"],
+    "NIKE": ["NIKE"],
+    "NVIDIA": ["NVIDIA", "NVDA"],
+    "PAYPAL": ["PAYPAL", "PYPL"],
+    "PEPSICO": ["PEPSICO", "PEPSI"],
+    "PFIZER": ["PFIZER"],
+    "TESLA": ["TESLA", "TSLA"],
+    "ULTABEAUTY": ["ULTA BEAUTY", "ULTA"],
+    "VERIZON": ["VERIZON", "VZ"],
+    "WALMART": ["WALMART", "WMT"],
+}
+
+KNOWN_COMPANIES: Set[str] = set(COMPANY_ALIASES.keys()) | {
+    alias.replace(" ", "") for aliases in COMPANY_ALIASES.values() for alias in aliases
 }
 
 
 def normalize_company(raw: str) -> str:
-    """Clean and normalize company names for consistent matching."""
-    cleaned = re.sub(r"[^A-Za-z0-9]", "", raw).upper()
-    if cleaned in ("ULTA", "ULTABEAUTY"):
-        return "ULTABEAUTY"
-    if cleaned in ("JNJ", "JOHNSONJOHNSON"):
-        return "JOHNSON_JOHNSON"
-    return cleaned
+    """Clean and normalize company names or aliases to a canonical identifier."""
+    if not raw:
+        return ""
+    cleaned = " " + re.sub(r"[^A-Za-z0-9&]", " ", raw).strip().upper() + " "
+    for canon, aliases in sorted(COMPANY_ALIASES.items(), key=lambda x: max(len(a) for a in x[1]), reverse=True):
+        for alias in aliases:
+            pattern = rf"(?<![A-Z0-9]){re.escape(alias)}(?![A-Z0-9])"
+            if re.search(pattern, cleaned):
+                return canon
+    return re.sub(r"[^A-Za-z0-9]", "", raw).upper()
 
 
 def extract_document_metadata(filename: str, text: Optional[str] = None) -> Dict[str, Any]:
@@ -149,16 +169,16 @@ def extract_query_metadata(
         "Did Verizon increase its debt in 2022?" -> {'company': 'VERIZON', 'year': 2022}
     """
     filters: Dict[str, Any] = {}
-    q_upper = query.upper()
 
     # 1. Detect Company
-    companies_to_check = available_companies or KNOWN_COMPANIES
-    for comp in companies_to_check:
-        comp_norm = normalize_company(comp)
-        # Match as full word
-        pattern = rf"\b{re.escape(comp)}\b"
-        if re.search(pattern, q_upper) or (comp_norm and re.search(rf"\b{re.escape(comp_norm)}\b", q_upper)):
-            filters["company"] = comp_norm
+    q_clean = " " + re.sub(r"[^A-Za-z0-9&]", " ", query).upper() + " "
+    for canon, aliases in sorted(COMPANY_ALIASES.items(), key=lambda x: max(len(a) for a in x[1]), reverse=True):
+        for alias in aliases:
+            pattern = rf"(?<![A-Z0-9]){re.escape(alias)}(?![A-Z0-9])"
+            if re.search(pattern, q_clean):
+                filters["company"] = canon
+                break
+        if "company" in filters:
             break
 
     # 2. Detect Year (only filter by year if a single distinct year is referenced;

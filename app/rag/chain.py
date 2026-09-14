@@ -514,10 +514,12 @@ class RAGChain:
             raise ValueError("user_id is required for retrieval")
 
         # Resolve metadata filter
-        resolved_filter = dict(metadata_filter) if metadata_filter else {}
-        if not resolved_filter and self.metadata_filtering_enabled:
+        resolved_filter = {}
+        if self.metadata_filtering_enabled:
             from app.rag.metadata_extractor import extract_query_metadata
             resolved_filter = extract_query_metadata(question)
+        if metadata_filter:
+            resolved_filter.update(metadata_filter)
 
         from app.rag.metadata_extractor import build_chroma_filter
         filter_dict = build_chroma_filter(user_id, resolved_filter)
