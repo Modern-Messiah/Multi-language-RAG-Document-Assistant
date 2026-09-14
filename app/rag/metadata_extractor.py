@@ -59,6 +59,15 @@ COMPANY_ALIASES: Dict[str, List[str]] = {
     "WALMART": ["WALMART", "WMT"],
 }
 
+ALL_COMPANY_ALIASES: Dict[str, List[str]] = {
+    canon: sorted(
+        set(aliases) | {canon, canon.replace("_", " "), canon.replace("_", "")},
+        key=len,
+        reverse=True,
+    )
+    for canon, aliases in COMPANY_ALIASES.items()
+}
+
 KNOWN_COMPANIES: Set[str] = set(COMPANY_ALIASES.keys()) | {
     alias.replace(" ", "") for aliases in COMPANY_ALIASES.values() for alias in aliases
 }
@@ -69,12 +78,12 @@ def normalize_company(raw: str) -> str:
     if not raw:
         return ""
     cleaned = " " + re.sub(r"[^A-Za-z0-9&]", " ", raw).strip().upper() + " "
-    for canon, aliases in sorted(COMPANY_ALIASES.items(), key=lambda x: max(len(a) for a in x[1]), reverse=True):
+    for canon, aliases in sorted(ALL_COMPANY_ALIASES.items(), key=lambda x: max(len(a) for a in x[1]), reverse=True):
         for alias in aliases:
             pattern = rf"(?<![A-Z0-9]){re.escape(alias)}(?![A-Z0-9])"
             if re.search(pattern, cleaned):
                 return canon
-    return re.sub(r"[^A-Za-z0-9]", "", raw).upper()
+    return ""
 
 
 def extract_document_metadata(filename: str, text: Optional[str] = None) -> Dict[str, Any]:
@@ -92,20 +101,20 @@ def extract_document_metadata(filename: str, text: Optional[str] = None) -> Dict
 
     parts = [p for p in re.split(r"[_.\-\s]+", clean_name) if p]
 
-    # 1. Company Extraction from tokens or clean_name
-    for token in parts:
-        token_upper = normalize_company(token)
-        for known in KNOWN_COMPANIES:
-            if known in token_upper or token_upper in known:
-                metadata["company"] = normalize_company(known)
+    # 1. Company Extraction: check clean_name first, then tokens
+    comp = normalize_company(clean_name)
+    if comp:
+        metadata["company"] = comp
+    else:
+        for token in parts:
+            c = normalize_company(token)
+            if c:
+                metadata["company"] = c
                 break
-        if "company" in metadata:
-            break
-
-    if "company" not in metadata and parts:
-        first_tok = parts[0].upper()
-        if len(first_tok) >= 2 and first_tok.isalpha():
-            metadata["company"] = first_tok
+        if "company" not in metadata and parts:
+            first_tok = parts[0].upper()
+            if len(first_tok) >= 2 and first_tok.isalpha():
+                metadata["company"] = first_tok
 
     # 2. Year Extraction
     for token in parts:
@@ -171,15 +180,9 @@ def extract_query_metadata(
     filters: Dict[str, Any] = {}
 
     # 1. Detect Company
-    q_clean = " " + re.sub(r"[^A-Za-z0-9&]", " ", query).upper() + " "
-    for canon, aliases in sorted(COMPANY_ALIASES.items(), key=lambda x: max(len(a) for a in x[1]), reverse=True):
-        for alias in aliases:
-            pattern = rf"(?<![A-Z0-9]){re.escape(alias)}(?![A-Z0-9])"
-            if re.search(pattern, q_clean):
-                filters["company"] = canon
-                break
-        if "company" in filters:
-            break
+    comp = normalize_company(query)
+    if comp:
+        filters["company"] = comp
 
     # 2. Detect Year (only filter by year if a single distinct year is referenced;
     # multi-year questions such as 'FY2018 - FY2020' or 'between 2021 and 2022' should
