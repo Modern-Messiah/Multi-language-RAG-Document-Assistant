@@ -181,3 +181,12 @@ Key architectural advantages:
 For repository analysis and developer pair programming:
 - **`cocoindex-code`** is an AST-aware semantic code indexing MCP server designed specifically for Claude Code and Cursor.
 - It maintains live call graphs, symbol tables, and vector embeddings updated on every Git commit, reducing token usage by up to 70% while providing instant repository-wide semantic search.
+
+### 5.4. CocoIndex Code (`ccc`) is Active in this Repository
+- **Current Workspace State**:
+  - Configuration: `.cocoindex_code/settings.yml`
+  - Index DB: `.cocoindex_code/target_sqlite.db` (~9 MB, 950+ chunks across 70 files)
+  - CLI binary: `ccc` (`/Users/denis/.local/bin/ccc`)
+- **Action for Claude**:
+  - Whenever exploring code relationships or answering user questions about the codebase architecture, execute `/Users/denis/.local/bin/ccc search "<query>"` for instant, semantic AST-grounded search.
+  - Proactively inform the user about findings from `ccc search`.
