@@ -84,6 +84,7 @@ class Settings(BaseSettings):
     # --- Chunking ---
     chunk_size: int = Field(default=1000, ge=1)
     chunk_overlap: int = Field(default=200, ge=0)
+    table_aware_chunking: bool = True
 
     # --- Storage ---
     chroma_persist_dir: Path = Path("./data/chroma_db")

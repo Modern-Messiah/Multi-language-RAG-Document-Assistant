@@ -867,6 +867,7 @@ variable of the same name, read from `.env` or the process environment.
 | `ALLOWED_MODEL_PROVIDERS` | Providers a caller may name with their own key, comma separated. Empty means all of them. | `""` |
 | `CHUNK_SIZE` | Characters per chunk, `>= 1`. | `1000` |
 | `CHUNK_OVERLAP` | Overlap between chunks; must be **smaller** than `CHUNK_SIZE`. | `200` |
+| `TABLE_AWARE_CHUNKING` | Preserve markdown/HTML tables intact and repeat headers on split tables. | `True` |
 | `CHROMA_PERSIST_DIR` | ChromaDB storage directory. | `./data/chroma_db` |
 | `COLLECTION_NAME` | ChromaDB collection name. | `documents` |
 | `UPLOAD_DIR` | Where raw uploads are stored. | `data/uploads` |
