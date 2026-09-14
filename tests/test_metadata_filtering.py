@@ -1,6 +1,6 @@
 """Unit and integration tests for Metadata Extraction and Filtering."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from langchain_core.documents import Document
@@ -10,9 +10,7 @@ from app.rag.metadata_extractor import (
     build_chroma_filter,
     extract_document_metadata,
     extract_query_metadata,
-    normalize_company,
 )
-
 
 # =========================
 # Unit: Metadata Extraction

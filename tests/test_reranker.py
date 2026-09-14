@@ -18,7 +18,6 @@ from app.rag.reranker import (
     get_reranker,
 )
 
-
 # =========================
 # NoOpReranker
 # =========================
