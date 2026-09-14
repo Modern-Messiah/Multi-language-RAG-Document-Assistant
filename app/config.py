@@ -74,6 +74,12 @@ class Settings(BaseSettings):
     # An explicit field is required because pydantic-settings reads .env
     # without exporting it, so the SDK's own env fallback never fires.
     openai_base_url: str = ""
+    # Override base URL for LLM completion calls specifically (e.g. https://api.deepseek.com).
+    # Empty falls back to openai_base_url.
+    llm_base_url: str = ""
+    # Override API key for LLM completion calls specifically (e.g. DeepSeek API key).
+    # Empty falls back to openai_api_key.
+    llm_api_key: str = ""
 
     # --- Chunking ---
     chunk_size: int = Field(default=1000, ge=1)

@@ -862,6 +862,8 @@ variable of the same name, read from `.env` or the process environment.
 | `OPENAI_TIMEOUT` | Seconds the OpenAI client waits. Keep it below the clients' own timeouts. | `45.0` |
 | `OPENAI_MAX_RETRIES` | Retries the OpenAI client makes on a transient failure. | `2` |
 | `OPENAI_BASE_URL` | Azure or an OpenAI-compatible endpoint (vLLM, Ollama). Empty means api.openai.com. | `""` |
+| `LLM_BASE_URL` | Override base URL for LLM completion calls (e.g. https://api.deepseek.com). Empty falls back to OPENAI_BASE_URL. | `""` |
+| `LLM_API_KEY` | Override API key for LLM completion calls (e.g. DeepSeek key). Empty falls back to OPENAI_API_KEY. | `""` |
 | `ALLOWED_MODEL_PROVIDERS` | Providers a caller may name with their own key, comma separated. Empty means all of them. | `""` |
 | `CHUNK_SIZE` | Characters per chunk, `>= 1`. | `1000` |
 | `CHUNK_OVERLAP` | Overlap between chunks; must be **smaller** than `CHUNK_SIZE`. | `200` |

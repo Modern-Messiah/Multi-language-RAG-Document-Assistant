@@ -173,12 +173,14 @@ async def lifespan(app: FastAPI):
     app.state.vectorstore = app.state.embeddings.get_vectorstore(
         settings.collection_name
     )
+    llm_key = settings.llm_api_key or settings.openai_api_key
+    llm_url = settings.llm_base_url or settings.openai_base_url
     app.state.rag_chain = RAGChain(
         app.state.vectorstore,
         model=settings.model_name,
         top_k=settings.top_k_results,
         temperature=settings.temperature,
-        api_key=settings.openai_api_key,
+        api_key=llm_key,
         max_answer_tokens=settings.max_answer_tokens,
         relevance_threshold=settings.relevance_threshold,
         max_history_turns=settings.max_history_turns,
@@ -186,7 +188,7 @@ async def lifespan(app: FastAPI):
         embeddings_manager=app.state.embeddings,
         timeout=settings.openai_timeout,
         max_retries=settings.openai_max_retries,
-        base_url=settings.openai_base_url,
+        base_url=llm_url,
         tracer=app.state.tracer,
     )
     yield
