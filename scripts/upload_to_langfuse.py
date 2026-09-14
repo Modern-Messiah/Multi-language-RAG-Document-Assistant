@@ -4,8 +4,8 @@ Supports uploading partial slices or ALL items (thousands of questions) rapidly.
 Deduplication is ensured by using deterministic unique IDs for each item.
 
 Usage:
-    python scripts/upload_to_langfuse.py --dataset sberquad --all
-    python scripts/upload_to_langfuse.py --dataset financebench --all
+    python scripts/upload_to_langfuse.py --dataset tydiqa --all
+    python scripts/upload_to_langfuse.py --dataset ragtruth --all
     python scripts/upload_to_langfuse.py --dataset all --all
 """
 import argparse
@@ -23,7 +23,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("upload_to_langfuse")
 
 BASE_DIR = Path(__file__).resolve().parent.parent / "data" / "benchmarks"
-WORKERS = 16
+WORKERS = 24
 
 
 def _batch_upload_items(client, dataset_name: str, items: List[Dict[str, Any]], desc: str = ""):
@@ -51,7 +51,7 @@ def _batch_upload_items(client, dataset_name: str, items: List[Dict[str, Any]], 
         for idx, fut in enumerate(as_completed(futures), start=1):
             if fut.result():
                 success += 1
-            if idx % 500 == 0 or idx == total:
+            if idx % 1000 == 0 or idx == total:
                 logger.info("  [%s] Progress: %d / %d items processed", dataset_name, idx, total)
 
     client.flush()
@@ -144,7 +144,6 @@ def upload_hotpotqa(client, max_count: int = None):
         )
 
     items = []
-    # Try downloading full validation parquet if available
     try:
         pq_path = hf_hub_download(
             repo_id="hotpotqa/hotpot_qa",
@@ -215,6 +214,86 @@ def upload_beir_scifact(client, max_count: int = None):
     _batch_upload_items(client, ds_name, items, "BEIR SciFact")
 
 
+def upload_tydiqa(client, max_count: int = None):
+    ds_name = "eval-tydiqa-multilingual"
+    try:
+        client.get_dataset(ds_name)
+    except Exception:
+        client.create_dataset(
+            name=ds_name,
+            description="TyDi QA: Google's typologically diverse multilingual question answering benchmark (11 languages)",
+        )
+
+    items = []
+    try:
+        pq_path = hf_hub_download(
+            repo_id="google-research-datasets/tydiqa",
+            filename="primary_task/validation-00000-of-00001.parquet",
+            repo_type="dataset",
+        )
+        table = pq.read_table(pq_path)
+        records = table.to_pylist()
+        for idx, r in enumerate(records):
+            lang = r.get("language", "multi")
+            items.append({
+                "id": f"tydi-{lang}-{idx}",
+                "input": {"question": r.get("question_text", "")},
+                "expected_output": {
+                    "document_title": r.get("document_title", ""),
+                    "document_url": r.get("document_url", ""),
+                },
+                "metadata": {
+                    "language": lang,
+                    "document_title": r.get("document_title", ""),
+                },
+            })
+            if max_count and len(items) >= max_count:
+                break
+    except Exception as err:
+        logger.warning("Error loading full tydiqa: %s", err)
+
+    _batch_upload_items(client, ds_name, items, "TyDi QA (Multilingual)")
+
+
+def upload_ragtruth(client, max_count: int = None):
+    source_file = BASE_DIR / "ragtruth" / "source_info.jsonl"
+    if not source_file.exists():
+        logger.error("RAGTruth source file not found at %s", source_file)
+        return
+
+    ds_name = "eval-ragtruth-hallucinations"
+    try:
+        client.get_dataset(ds_name)
+    except Exception:
+        client.create_dataset(
+            name=ds_name,
+            description="RAGTruth: Benchmark for measuring word-level hallucinations and faithfulness in RAG",
+        )
+
+    items = []
+    with open(source_file, "r", encoding="utf-8") as f:
+        for line in f:
+            data = json.loads(line)
+            src_id = data.get("source_id", "")
+            prompt_text = data.get("prompt") or data.get("source_info", "")
+            items.append({
+                "id": f"ragtruth-{src_id}" if src_id else None,
+                "input": {"question": prompt_text[:2000]},
+                "expected_output": {
+                    "task_type": data.get("task_type", ""),
+                    "source": data.get("source", ""),
+                },
+                "metadata": {
+                    "task_type": data.get("task_type", ""),
+                    "source": data.get("source", ""),
+                },
+            })
+            if max_count and len(items) >= max_count:
+                break
+
+    _batch_upload_items(client, ds_name, items, "RAGTruth (Hallucinations)")
+
+
 def main():
     load_dotenv()
     from langfuse import Langfuse
@@ -222,7 +301,7 @@ def main():
     parser = argparse.ArgumentParser(description="Upload benchmarks to Langfuse Datasets")
     parser.add_argument(
         "--dataset",
-        choices=["financebench", "sberquad", "hotpotqa", "scifact", "all"],
+        choices=["financebench", "sberquad", "hotpotqa", "scifact", "tydiqa", "ragtruth", "all"],
         default="all",
         help="Dataset to upload",
     )
@@ -243,6 +322,10 @@ def main():
         upload_beir_scifact(client, max_count)
     if args.dataset in ("hotpotqa", "all"):
         upload_hotpotqa(client, max_count)
+    if args.dataset in ("tydiqa", "all"):
+        upload_tydiqa(client, max_count)
+    if args.dataset in ("ragtruth", "all"):
+        upload_ragtruth(client, max_count)
 
     print("\n🎉 Upload to Langfuse completed!")
     print("Refresh the Langfuse Datasets page (http://localhost:3000) to see all uploaded questions.")
