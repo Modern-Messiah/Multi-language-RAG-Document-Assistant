@@ -149,6 +149,7 @@ anyio==4.14.2 \
     --hash=sha256:cfa139f3ed1a23ee8f88a145ddb5ac7605b8bbfd8592baacd7ce3d8bb4313c7f
     # via
     #   httpx
+    #   langfuse
     #   openai
     #   starlette
     #   watchfiles
@@ -172,7 +173,9 @@ attrs==26.1.0 \
 backoff==2.2.1 \
     --hash=sha256:03f829f5bb1923180821643f8753b0502c3b682293992485b0eef2807afa5cba \
     --hash=sha256:63579f9a0628e06278f7e47b7d7d5b6ce20dc65c5e96a6f3ca99a6adca0396e8
-    # via posthog
+    # via
+    #   langfuse
+    #   posthog
 bcrypt==5.0.0 \
     --hash=sha256:046ad6db88edb3c5ece4369af997938fb1c19d6a699b9c1b27b0db432faae4c4 \
     --hash=sha256:0c418ca99fd47e9c59a301744d63328f17798b5947b0f791e9af3c1c499c2d0a \
@@ -827,6 +830,7 @@ httpx==0.27.0 \
     #   -r requirements.txt
     #   fastapi
     #   huggingface-hub
+    #   langfuse
     #   langsmith
     #   openai
     #   python-telegram-bot
@@ -845,6 +849,7 @@ idna==3.19 \
     #   anyio
     #   email-validator
     #   httpx
+    #   langfuse
     #   requests
     #   yarl
 importlib-metadata==8.4.0 \
@@ -914,6 +919,10 @@ langchain-text-splitters==0.0.2 \
     --hash=sha256:13887f32705862c1e1454213cb7834a63aae57c26fcd80346703a1d09c46168d \
     --hash=sha256:ac8927dc0ba08eba702f6961c9ed7df7cead8de19a9f7101ab2b5ea34201b3c1
     # via langchain
+langfuse==2.60.10 \
+    --hash=sha256:815c6369194aa5b2a24f88eb9952f7c3fc863272c41e90642a71f3bc76f4a11f \
+    --hash=sha256:a26d0d927a28ee01b2d12bb5b862590b643cc4e60a28de6e2b0c2cfff5dbfc6a
+    # via -r requirements.txt
 langsmith==0.1.147 \
     --hash=sha256:2e933220318a4e73034657103b3b1a3a6109cc5db3566a7e8e03be8d6d7def7a \
     --hash=sha256:7166fc23b965ccf839d64945a78e9f1157757add228b086141eb03a60d699a15
@@ -1696,6 +1705,7 @@ packaging==23.2 \
     #   build
     #   huggingface-hub
     #   langchain-core
+    #   langfuse
     #   marshmallow
     #   onnxruntime
     #   pytest
@@ -2077,6 +2087,7 @@ pydantic==2.7.1 \
     #   fastapi
     #   langchain
     #   langchain-core
+    #   langfuse
     #   langsmith
     #   openai
     #   pydantic-settings
@@ -2318,6 +2329,7 @@ requests==2.32.3 \
     #   kubernetes
     #   langchain
     #   langchain-community
+    #   langfuse
     #   langsmith
     #   posthog
     #   requests-oauthlib
@@ -3220,6 +3232,7 @@ wrapt==1.17.3 \
     --hash=sha256:fd341868a4b6714a5962c1af0bd44f7c404ef78720c7de4892901e540417111c
     # via
     #   deprecated
+    #   langfuse
     #   opentelemetry-instrumentation
 yarl==1.24.5 \
     --hash=sha256:0055afc45e864b92729ac7600e2d102c17bef060647e74bca75fa84d66b9ff36 \

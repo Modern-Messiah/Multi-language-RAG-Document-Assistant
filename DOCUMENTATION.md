@@ -874,6 +874,10 @@ variable of the same name, read from `.env` or the process environment.
 | `FEEDBACK_ENABLED` | Whether answers can be rated. Off makes `POST /feedback` answer 404 and creates nothing on disk. | `True` |
 | `FEEDBACK_DIR` | Where `feedback.jsonl` is written. | `data/feedback` |
 | `FEEDBACK_MAX_BYTES` | Cap on that file. At the cap new ratings are refused with 507 instead of filling the volume. | `10485760` (10 MB) |
+| `LANGFUSE_ENABLED` | Whether Langfuse tracing is active. False disables all tracing with zero network overhead. | `False` |
+| `LANGFUSE_PUBLIC_KEY` | Langfuse public key (from project settings). | `""` |
+| `LANGFUSE_SECRET_KEY` | Langfuse secret key. | `""` |
+| `LANGFUSE_HOST` | Langfuse instance URL. Cloud or self-hosted. | `https://cloud.langfuse.com` |
 | `TELEGRAM_BOT_TOKEN` | Required by the bot only; read directly by `clients/telegram_bot.py`. | - |
 | `BACKEND_URL` | Backend base URL used by the frontend and bot. Compose overrides it to `http://backend:8000`. | `http://localhost:8000` |
 

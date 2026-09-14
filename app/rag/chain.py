@@ -13,6 +13,7 @@ from openai import OpenAI
 
 from app.rag.embeddings import DEFAULT_SPACE, distance_to_similarity, select_mmr
 from app.rag.languages import AUTO_LANGUAGE, LANG_RULES, rule_for
+from app.tracing import NoOpTraceHandle, NoOpTracer
 
 # LANG_RULES is re-exported: it lived here first, and the clients now read the
 # same table from app.rag.languages instead of keeping their own copies.
@@ -104,6 +105,7 @@ class RAGChain:
         timeout: Optional[float] = None,
         max_retries: Optional[int] = None,
         base_url: str = "",
+        tracer=None,
     ):
         """
         Args:
@@ -135,6 +137,7 @@ class RAGChain:
         # MMR needs candidate vectors, and only the manager can produce them.
         self.embeddings_manager = embeddings_manager
         self._warned_about_mmr = False
+        self.tracer = tracer or NoOpTracer()
 
         if client is not None:
             self.client = client
@@ -455,7 +458,7 @@ class RAGChain:
 
         return sources
 
-    def _prepare(self, question, language, user_id, history, client=None, model=None):
+    def _prepare(self, question, language, user_id, history, client=None, model=None, trace=None):
         """Retrieve and build the chat request.
 
         Shared by ask() and ask_stream() so the two cannot drift: a prompt
@@ -471,13 +474,25 @@ class RAGChain:
             raise ValueError("user_id is required for retrieval")
 
         filter_dict = {"user_id": user_id}
+        trace_handle = trace or NoOpTraceHandle()
 
         # Retrieve on the standalone form, answer the question as asked. The
         # condensing call goes on the caller's key too: it is their question
         # being rewritten, and billing half an exchange to each side would be
         # the strangest possible split.
         search_query = self._condense(question, history, client, model)
+        if search_query != question:
+            condense_span = trace_handle.span("query_condense", input={"question": question})
+            condense_span.end(output={"rewritten": search_query})
+
+        retrieval_span = trace_handle.span("retrieval", input={"query": search_query})
         docs = self._retrieve(search_query, filter_dict)
+        retrieval_span.end(
+            output={
+                "count": len(docs),
+                "sources": [d.metadata.get("source", "unknown") for d in docs],
+            }
+        )
 
         if not docs:
             return None, []
@@ -529,6 +544,7 @@ Answer:
         history=None,
         client=None,
         model=None,
+        trace=None,
     ) -> Dict:
         """Answer one question.
 
@@ -536,23 +552,55 @@ Answer:
         model they chose; the chain's own are used when they are not given. The
         chain never keeps them - see app/byok.py for why.
         """
+        trace_handle = trace or NoOpTraceHandle()
         request, sources = self._prepare(
-            question, language, user_id, history, client, model
+            question, language, user_id, history, client, model, trace=trace_handle
         )
 
         if request is None:
+            trace_handle.end(output={"answer": NO_CONTEXT_ANSWER, "sources": []})
             return {"answer": NO_CONTEXT_ANSWER, "sources": [], "model": None}
 
-        response = (client or self.client).chat.completions.create(**request)
-        self._log_usage(response, user_id, model)
+        gen_handle = trace_handle.generation(
+            name="generation",
+            model=request.get("model"),
+            input=request.get("messages"),
+            model_parameters={
+                "temperature": self.temperature,
+                "max_tokens": self.max_answer_tokens,
+            },
+        )
 
-        raw_answer = (response.choices[0].message.content or "").strip()
+        try:
+            response = (client or self.client).chat.completions.create(**request)
+            self._log_usage(response, user_id, model)
 
-        return {
-            "answer": self._strip_citations(raw_answer),
-            "sources": sources,
-            "model": request["model"],
-        }
+            raw_answer = (response.choices[0].message.content or "").strip()
+            clean_answer = self._strip_citations(raw_answer)
+
+            usage = getattr(response, "usage", None)
+            usage_dict = (
+                {
+                    "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+                    "completion_tokens": getattr(usage, "completion_tokens", 0),
+                    "total_tokens": getattr(usage, "total_tokens", 0),
+                }
+                if usage
+                else None
+            )
+
+            gen_handle.end(output=clean_answer, usage=usage_dict)
+            trace_handle.end(output={"answer": clean_answer, "sources": sources})
+
+            return {
+                "answer": clean_answer,
+                "sources": sources,
+                "model": request["model"],
+            }
+        except Exception as exc:
+            gen_handle.end(level="ERROR", status_message=str(exc))
+            trace_handle.end(metadata={"error": str(exc)})
+            raise
 
     # =========================
     # Streaming
@@ -565,6 +613,7 @@ Answer:
         history=None,
         client=None,
         model=None,
+        trace=None,
     ):
         """Yield the answer as it is generated.
 
@@ -579,49 +628,67 @@ Answer:
             {"type": "token", "text": "..."}
             {"type": "done"}
         """
+        trace_handle = trace or NoOpTraceHandle()
         request, sources = self._prepare(
-            question, language, user_id, history, client, model
+            question, language, user_id, history, client, model, trace=trace_handle
         )
 
         if request is None:
+            trace_handle.end(output={"answer": NO_CONTEXT_ANSWER, "sources": []})
             yield {"type": "sources", "sources": sources}
             yield {"type": "token", "text": NO_CONTEXT_ANSWER}
             yield {"type": "done"}
             return
 
-        # The completion is opened BEFORE the first event. create() returns
-        # once the response headers arrive, so an upstream refusal - a rejected
-        # key above all, which is the commonest mistake when a caller brings
-        # their own - raises while the handler is still priming this generator
-        # and can answer with a real status code. Yielding sources first
-        # committed a 200 to the wire and left the refusal to be dug out of the
-        # stream as a mid-answer error event. Token order is unchanged: nothing
-        # can be generated before the request is sent either way.
-        stream = (client or self.client).chat.completions.create(**request, stream=True)
+        gen_handle = trace_handle.generation(
+            name="generation",
+            model=request.get("model"),
+            input=request.get("messages"),
+            model_parameters={
+                "temperature": self.temperature,
+                "max_tokens": self.max_answer_tokens,
+            },
+        )
+
+        try:
+            stream = (client or self.client).chat.completions.create(**request, stream=True)
+        except Exception as exc:
+            gen_handle.end(level="ERROR", status_message=str(exc))
+            trace_handle.end(metadata={"error": str(exc)})
+            raise
 
         yield {"type": "sources", "sources": sources}
 
         stripper = CitationStripper()
-
+        collected = []
         finish_reason = None
-        for chunk in stream:
-            choices = getattr(chunk, "choices", None) or []
-            if not choices:
-                continue
-            finish_reason = getattr(choices[0], "finish_reason", None) or finish_reason
-            delta = getattr(getattr(choices[0], "delta", None), "content", None)
-            if not delta:
-                continue
-            text = stripper.feed(delta)
-            if text:
-                yield {"type": "token", "text": text}
+        try:
+            for chunk in stream:
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    continue
+                finish_reason = getattr(choices[0], "finish_reason", None) or finish_reason
+                delta = getattr(getattr(choices[0], "delta", None), "content", None)
+                if not delta:
+                    continue
+                text = stripper.feed(delta)
+                if text:
+                    collected.append(text)
+                    yield {"type": "token", "text": text}
 
-        tail = stripper.flush()
-        if tail:
-            yield {"type": "token", "text": tail}
+            tail = stripper.flush()
+            if tail:
+                collected.append(tail)
+                yield {"type": "token", "text": tail}
 
-        # A streamed response carries no usage block, so the per-tenant cost
-        # line that ask() logs is not available here; finish_reason is.
+            full_text = "".join(collected)
+            gen_handle.end(output=full_text, metadata={"finish_reason": finish_reason})
+            trace_handle.end(output={"answer": full_text, "sources": sources})
+        except Exception as exc:
+            gen_handle.end(level="ERROR", status_message=str(exc))
+            trace_handle.end(metadata={"error": str(exc)})
+            raise
+
         logger.info(
             "streamed completion user_id=%s model=%s finish_reason=%s",
             user_id,
@@ -636,3 +703,4 @@ Answer:
             )
 
         yield {"type": "done"}
+

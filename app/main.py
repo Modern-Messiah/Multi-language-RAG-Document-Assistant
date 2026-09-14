@@ -53,6 +53,7 @@ from app.rag.chain import RAGChain
 from app.rag.document_loader import SUPPORTED_EXTENSIONS, DocumentLoader
 from app.rag.embeddings import EmbeddingsManager
 from app.rag.text_splitter import TextChunker
+from app.tracing import NoOpTracer, get_tracer
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +168,8 @@ async def lifespan(app: FastAPI):
         max_retries=settings.openai_max_retries,
         base_url=settings.openai_base_url,
     )
+
+    app.state.tracer = get_tracer(settings)
     app.state.vectorstore = app.state.embeddings.get_vectorstore(
         settings.collection_name
     )
@@ -184,8 +187,11 @@ async def lifespan(app: FastAPI):
         timeout=settings.openai_timeout,
         max_retries=settings.openai_max_retries,
         base_url=settings.openai_base_url,
+        tracer=app.state.tracer,
     )
     yield
+    app.state.tracer.flush()
+    app.state.tracer.shutdown()
 
 
 def create_app(settings: Optional[Settings] = None) -> FastAPI:
@@ -196,6 +202,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         lifespan=lifespan,
     )
     application.state.settings = settings or get_settings()
+    application.state.tracer = NoOpTracer()
     application.include_router(router)
     application.add_middleware(RequestContextMiddleware)
 
@@ -578,6 +585,19 @@ def query_rag(request: Request, payload: QueryRequest):
     key, model, provider = _caller_model(request)
     client = byok.client_for(key, settings, provider) if key else None
 
+    tracer = getattr(request.app.state, "tracer", None)
+    trace = (
+        tracer.start_trace(
+            request_id=request_id_of(request),
+            user_id=payload.user_id,
+            question=payload.question,
+            language=payload.language,
+            tags=[provider or "default"],
+        )
+        if tracer
+        else None
+    )
+
     try:
         answer = request.app.state.rag_chain.ask(
             question=payload.question,
@@ -586,6 +606,7 @@ def query_rag(request: Request, payload: QueryRequest):
             history=payload.history,
             client=client,
             model=model,
+            trace=trace,
         )
     except RateLimitError as exc:
         if client:
@@ -672,6 +693,19 @@ def query_rag_stream(request: Request, payload: QueryRequest):
     key, model, provider = _caller_model(request)
     client = byok.client_for(key, settings, provider) if key else None
 
+    tracer = getattr(request.app.state, "tracer", None)
+    trace = (
+        tracer.start_trace(
+            request_id=request_id_of(request),
+            user_id=payload.user_id,
+            question=payload.question,
+            language=payload.language,
+            tags=[provider or "default"],
+        )
+        if tracer
+        else None
+    )
+
     stream = request.app.state.rag_chain.ask_stream(
         question=payload.question,
         language=payload.language,
@@ -679,6 +713,7 @@ def query_rag_stream(request: Request, payload: QueryRequest):
         history=payload.history,
         client=client,
         model=model,
+        trace=trace,
     )
 
     try:
@@ -851,6 +886,15 @@ def submit_feedback(request: Request, payload: FeedbackRequest):
     except OSError:
         logger.exception("Could not write feedback")
         raise HTTPException(status_code=503, detail="Feedback storage unavailable")
+
+    tracer = getattr(request.app.state, "tracer", None)
+    if tracer is not None:
+        tracer.record_feedback(
+            request_id=payload.request_id,
+            rating=payload.rating,
+            comment=payload.comment,
+            user_id=payload.user_id,
+        )
 
     request.app.state.activity.touch(payload.user_id)
     return FeedbackResponse(message="Thanks - recorded.")

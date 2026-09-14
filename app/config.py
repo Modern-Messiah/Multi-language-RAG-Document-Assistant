@@ -117,6 +117,15 @@ class Settings(BaseSettings):
     # lives on; move the file aside to start a fresh one.
     feedback_max_bytes: int = Field(default=10 * 1024 * 1024, ge=1)  # 10 MB
 
+    # --- Langfuse Observability ---
+    # Optional integration with Langfuse (cloud or self-hosted).
+    # When disabled or keys are missing, tracing is a complete no-op with zero
+    # network overhead, which keeps offline tests fast and isolated.
+    langfuse_enabled: bool = False
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "https://cloud.langfuse.com"
+
     @model_validator(mode="after")
     def _api_key_is_header_safe(self) -> "Settings":
         # HTTP header values are latin-1 on the wire while clients send UTF-8,

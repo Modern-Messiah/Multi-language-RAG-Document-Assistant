@@ -1,0 +1,45 @@
+# Local self-hosted Langfuse server
+# Run with: docker compose -f docker-compose.langfuse.yml up -d
+# Web UI will be available at: http://localhost:3000
+services:
+  langfuse-server:
+    image: langfuse/langfuse:2
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      - NEXTAUTH_URL=http://localhost:3000
+      - NEXTAUTH_SECRET=my-super-secret-nextauth-key-change-in-prod
+      - SALT=my-super-secret-salt-key-change-in-prod
+      - TELEMETRY_ENABLED=false
+    restart: unless-stopped
+    networks:
+      - langfuse_net
+
+  langfuse-db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=langfuse
+      - POSTGRES_PASSWORD=langfuse
+      - POSTGRES_DB=langfuse
+    volumes:
+      - langfuse_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - langfuse_net
+
+networks:
+  langfuse_net:
+    driver: bridge
+
+volumes:
+  langfuse_postgres_data:
