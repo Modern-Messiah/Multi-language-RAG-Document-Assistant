@@ -76,11 +76,11 @@ def test_extract_query_metadata_from_questions():
     assert m3.get("year") == 2023
     assert m3.get("quarter") == "Q2"
 
-    # Multi-year comparative question: filters by company, but leaves year open to prevent false negatives
+    # Multi-year comparative question: filters by company and restricts year scope via $in
     q5 = "What is the FY2018 - FY2020 3 year average unadjusted EBITDA % margin for Walmart?"
     m5 = extract_query_metadata(q5)
     assert m5.get("company") == "WALMART"
-    assert "year" not in m5
+    assert m5.get("year") == {"$in": [2018, 2019, 2020]}
 
     # Multi-word alias company names
     assert extract_query_metadata("What was Boeing's revenue in 2022?").get("company") == "BOEING"

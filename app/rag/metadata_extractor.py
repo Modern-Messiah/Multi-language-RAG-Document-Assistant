@@ -188,15 +188,19 @@ def extract_query_metadata(
     if comp:
         filters["company"] = comp
 
-    # 2. Detect Year (only filter by year if a single distinct year is referenced;
-    # multi-year questions such as 'FY2018 - FY2020' or 'between 2021 and 2022' should
-    # retrieve across all relevant years for that company).
+    # 2. Detect Year (single year gets exact match, multi-year spans get Chroma $in list)
     all_years = [int(y) for y in re.findall(r"(?<!\d)(?:19\d\d|20[0-3]\d)(?!\d)", query)]
     for m in re.finditer(r"\bFY\s*(\d{2})\b", query, re.IGNORECASE):
         all_years.append(int(f"20{m.group(1)}"))
     distinct_years = sorted(set(all_years))
     if len(distinct_years) == 1:
         filters["year"] = distinct_years[0]
+    elif 1 < len(distinct_years) <= 5:
+        min_y, max_y = distinct_years[0], distinct_years[-1]
+        if max_y - min_y <= 5:
+            filters["year"] = {"$in": list(range(min_y, max_y + 1))}
+        else:
+            filters["year"] = {"$in": distinct_years}
 
     # 3. Detect Quarter
     q_match = QUARTER_PATTERN.search(query)
