@@ -36,8 +36,17 @@ def _normalise(value: str) -> str:
 
 
 def _settings_defaults():
-    settings = Settings(_env_file=None, openai_api_key="placeholder")
-    return {name.upper(): getattr(settings, name) for name in Settings.model_fields}
+    import os
+    saved = {}
+    for name in Settings.model_fields:
+        key = name.upper()
+        if key in os.environ:
+            saved[key] = os.environ.pop(key)
+    try:
+        settings = Settings(_env_file=None, openai_api_key="placeholder")
+        return {name.upper(): getattr(settings, name) for name in Settings.model_fields}
+    finally:
+        os.environ.update(saved)
 
 
 # =========================

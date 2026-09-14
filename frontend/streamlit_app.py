@@ -299,7 +299,7 @@ with st.sidebar:
             "openai": "gpt-4o",
             "anthropic": "claude-3-5-sonnet-20241022",
             "gemini": "gemini-1.5-flash",
-            "deepseek": "DeepSeek-V4.1-Flash",
+            "deepseek": "deepseek-flash",
             "kimi": "moonshot-v1-8k",
             "kimi-cn": "moonshot-v1-8k",
         }
@@ -308,7 +308,7 @@ with st.sidebar:
 
         st.text_input(
             "Model", key="own_model", placeholder=model_placeholder,
-            help="Any model your key can reach at that provider (e.g. DeepSeek-V4.1-Flash). "
+            help="Any model your key can reach at that provider (e.g. deepseek-flash). "
                  "Empty means the assistant's own.",
             disabled=not st.session_state["own_key"],
         )

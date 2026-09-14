@@ -687,7 +687,7 @@ def test_deepseek_v4_flash_model_is_accepted():
         MODEL_HEADER: "DeepSeek-V4.1-Flash",
         byok.PROVIDER_HEADER: "deepseek",
     })
-    assert model == "DeepSeek-V4.1-Flash"
+    assert model == "deepseek-flash"
     assert provider == "deepseek"
     assert key == GOOD_KEY
 

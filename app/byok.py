@@ -128,6 +128,12 @@ def wanted(headers, settings=None) -> tuple:
                 f"{', '.join(permitted)}."
             )
 
+    # Normalize model aliases (e.g. DeepSeek-V4.1-Flash -> deepseek-flash)
+    if provider == "deepseek" and model:
+        cleaned = model.lower().replace("_", "-")
+        if cleaned in ("deepseek-v4.1-flash", "deepseek-v4-flash", "v4.1-flash"):
+            model = "deepseek-flash"
+
     return (key or None), (model or None), (provider or None)
 
 
