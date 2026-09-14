@@ -207,15 +207,17 @@ def get_corpus_and_expectations(dataset_name: str, items: list):
         context_to_filename = {}
         for idx, item in enumerate(items):
             title = (item.metadata or {}).get("title") or "doc"
-            context = (item.metadata or {}).get("context") or ""
-            ctx_key = context.strip()
-            if ctx_key not in context_to_filename:
+            context = ((item.metadata or {}).get("context") or "").strip()
+            if not context:
+                item_expected.append([])
+                continue
+            if context not in context_to_filename:
                 safe_title = "".join(c for c in title if c.isalnum() or c in (" ", "_", "-")).strip()[:20]
-                h = hashlib.sha256(ctx_key.encode("utf-8")).hexdigest()[:8]
+                h = hashlib.sha256(context.encode("utf-8")).hexdigest()[:8]
                 fname = f"doc_{len(context_to_filename)}_{safe_title}_{h}.txt"
-                context_to_filename[ctx_key] = fname
+                context_to_filename[context] = fname
                 corpus[fname] = context
-            item_expected.append([context_to_filename[ctx_key]])
+            item_expected.append([context_to_filename[context]])
         return corpus, item_expected
     else:
         item_expected = [
@@ -240,6 +242,7 @@ def run_experiment(
     reranker_key: Optional[str] = None,
     reranker_model: Optional[str] = None,
     keep_tenant: bool = False,
+    tenant_override: Optional[str] = None,
 ):
     dataset = sync_dataset_items(langfuse_client, dataset_name)
     if not run_name:
@@ -251,22 +254,31 @@ def run_experiment(
     if limit:
         items = items[:limit]
 
-    tenant_id = f"eval-{uuid.uuid4().hex[:12]}"
-    print(f"\n🚀 Starting Langfuse Experiment Run: '{run_name}' on '{dataset_name}'")
+    tenant_id = tenant_override or f"eval-{uuid.uuid4().hex[:12]}"
+    print(f"\n🚀 Starting Langfuse Experiment Run: '{run_name}' on '{dataset_name}'", flush=True)
     if provider:
-        print(f"  Provider: {provider} | Model: {model or 'default'}")
+        print(f"  Provider: {provider} | Model: {model or 'default'}", flush=True)
 
     corpus, item_expectations = get_corpus_and_expectations(dataset_name, items)
-    print(f"Uploading {len(corpus)} documents to tenant: {tenant_id}...")
-    batch_size = 50 if len(corpus) > 200 else 1
-    for i, (filename, text) in enumerate(corpus.items(), start=1):
-        res = backend.upload(tenant_id, filename, text)
-        if batch_size == 1:
-            print(f"  ✓ {filename}: {res.get('chunks', 0)} chunk(s)")
-        elif i % batch_size == 0 or i == len(corpus):
-            print(f"  ✓ Uploaded {i}/{len(corpus)} documents ({i/len(corpus)*100:.1f}%)")
+    if not tenant_override:
+        print(f"Uploading {len(corpus)} documents to tenant: {tenant_id}...", flush=True)
+        batch_size = 50 if len(corpus) > 200 else 1
+        for i, (filename, text) in enumerate(corpus.items(), start=1):
+            if not text or not text.strip():
+                continue
+            try:
+                res = backend.upload(tenant_id, filename, text)
+            except Exception as err:
+                print(f"  Warning: failed to upload {filename}: {err}", flush=True)
+                continue
+            if batch_size == 1:
+                print(f"  ✓ {filename}: {res.get('chunks', 0)} chunk(s)", flush=True)
+            elif i % batch_size == 0 or i == len(corpus):
+                print(f"  ✓ Uploaded {i}/{len(corpus)} documents ({i/len(corpus)*100:.1f}%)", flush=True)
+    else:
+        print(f"Reusing existing tenant {tenant_id} with pre-indexed corpus.", flush=True)
 
-    print(f"\nEvaluating {len(items)} dataset items...")
+    print(f"\nEvaluating {len(items)} dataset items...", flush=True)
     eval_cases = []
     start_all = time.time()
 
@@ -311,7 +323,7 @@ def run_experiment(
         rec = recall_at_k(expected_sources, retrieved_sources, top_k) if not is_negative else 1.0
 
         hit_label = "PASS" if hit else "FAIL"
-        print(f"  [{idx}/{len(items)}] [{hit_label}] {q[:50]:52} -> {retrieved_sources} ({latency_ms:.0f}ms)")
+        print(f"  [{idx}/{len(items)}] [{hit_label}] {q[:50]:52} -> {retrieved_sources} ({latency_ms:.0f}ms)", flush=True)
 
         # Link trace to Langfuse dataset item and run
         meta = {"provider": provider or "default", "model": model or "default"}
@@ -361,23 +373,27 @@ def run_experiment(
             value=float(latency_ms),
         )
 
+        # Flush to Langfuse early and regularly so live UI updates
+        if idx == 1 or idx % 10 == 0:
+            langfuse_client.flush()
+
     langfuse_client.flush()
     total_time = time.time() - start_all
 
-    print("\n--- Aggregate Metrics ---")
+    print("\n--- Aggregate Metrics ---", flush=True)
     summary = aggregate(eval_cases, k=top_k)
     for k, v in summary.items():
-        print(f"  {k:16}: {v:.3f}" if isinstance(v, float) else f"  {k:16}: {v}")
-    print(f"  Total Duration  : {total_time:.2f}s")
+        print(f"  {k:16}: {v:.3f}" if isinstance(v, float) else f"  {k:16}: {v}", flush=True)
+    print(f"  Total Duration  : {total_time:.2f}s", flush=True)
 
-    if not keep_tenant:
+    if not keep_tenant and not tenant_override:
         backend.clear(tenant_id)
-        print(f"\nCleared temporary tenant {tenant_id}.")
+        print(f"\nCleared temporary tenant {tenant_id}.", flush=True)
     else:
-        print(f"\nKept tenant {tenant_id} as requested.")
+        print(f"\nKept tenant {tenant_id} as requested.", flush=True)
 
-    print(f"\n✅ Experiment '{run_name}' completed and synced to Langfuse!")
-    print(f"Open Langfuse UI -> Datasets -> '{dataset_name}' -> Runs to view full results.")
+    print(f"\n✅ Experiment '{run_name}' completed and synced to Langfuse!", flush=True)
+    print(f"Open Langfuse UI -> Datasets -> '{dataset_name}' -> Runs to view full results.", flush=True)
 
 
 def main(argv=None):
@@ -399,6 +415,7 @@ def main(argv=None):
     parser.add_argument("--reranker-key", default="", help="API key for Cohere reranker")
     parser.add_argument("--reranker-model", default="", help="Model override for reranker")
     parser.add_argument("--keep", action="store_true", help="Keep scratch tenant documents")
+    parser.add_argument("--tenant", default=None, help="Reuse an existing tenant ID")
     parser.add_argument("--sync-only", action="store_true", help="Only sync dataset items without running")
     args = parser.parse_args(argv)
 
@@ -423,6 +440,7 @@ def main(argv=None):
             reranker_key=args.reranker_key,
             reranker_model=args.reranker_model,
             keep_tenant=args.keep,
+            tenant_override=args.tenant,
         )
     except urllib.error.URLError as err:
         print(f"Failed to connect to backend at {args.url}: {err}", file=sys.stderr)
