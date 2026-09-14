@@ -290,3 +290,5 @@ data/**/test_pipeline/
 
 # Binary vector data
 *.bin
+# CocoIndex Code (ccc)
+/.cocoindex_code/
