@@ -139,6 +139,10 @@ class Settings(BaseSettings):
     reranker_api_key: str = ""
     retrieval_candidates: int = Field(default=20, ge=1)
 
+    # --- Metadata Filtering ---
+    # Enables automatic/explicit metadata extraction and ChromaDB filtering (year, company, doc_type).
+    metadata_filtering_enabled: bool = True
+
     @model_validator(mode="after")
     def _api_key_is_header_safe(self) -> "Settings":
         # HTTP header values are latin-1 on the wire while clients send UTF-8,
