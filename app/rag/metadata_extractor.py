@@ -194,7 +194,12 @@ def extract_query_metadata(
         all_years.append(int(f"20{m.group(1)}"))
     distinct_years = sorted(set(all_years))
     if len(distinct_years) == 1:
-        filters["year"] = distinct_years[0]
+        y = distinct_years[0]
+        # In financial filings, forward-looking guidance or forecasts for year Y are published at end of Y-1
+        if re.search(r"\b(forecast|guidance|expect|outlook|project|accelerat)\w*", query, re.I):
+            filters["year"] = {"$in": [y - 1, y]}
+        else:
+            filters["year"] = y
     elif 1 < len(distinct_years) <= 5:
         min_y, max_y = distinct_years[0], distinct_years[-1]
         if max_y - min_y <= 5:
