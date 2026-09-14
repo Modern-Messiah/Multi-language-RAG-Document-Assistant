@@ -13,8 +13,9 @@ services:
       - NODE_ENV=production
       - DATABASE_URL=postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
       - NEXTAUTH_URL=http://localhost:3000
-      - NEXTAUTH_SECRET=my-super-secret-nextauth-key-change-in-prod
-      - SALT=my-super-secret-salt-key-change-in-prod
+      - NEXTAUTH_SECRET=3fa8bcfcc02705b26a9f3857c5933eae4985d316387561b7e851475c24dd8691
+      - SALT=2bb5bf6bf06bcaa0b43f8fad1dd0d9084c56b7754aca42ff8ac97165cfc076d1
+      - ENCRYPTION_KEY=2bb5bf6bf06bcaa0b43f8fad1dd0d9084c56b7754aca42ff8ac97165cfc076d1
       - TELEMETRY_ENABLED=false
     restart: unless-stopped
     networks:
