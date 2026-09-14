@@ -201,15 +201,21 @@ def get_corpus_and_expectations(dataset_name: str, items: list):
             item_expected.append(doc_sources)
         return corpus, item_expected
     elif dataset_name == "eval-sberquad-ru":
+        import hashlib
         corpus = {}
         item_expected = []
+        context_to_filename = {}
         for idx, item in enumerate(items):
-            title = (item.metadata or {}).get("title") or f"doc_{idx}"
+            title = (item.metadata or {}).get("title") or "doc"
             context = (item.metadata or {}).get("context") or ""
-            safe_title = "".join(c for c in title if c.isalnum() or c in (" ", "_", "-")).strip()[:30]
-            fname = f"doc_{idx}_{safe_title}.txt"
-            corpus[fname] = context
-            item_expected.append([fname])
+            ctx_key = context.strip()
+            if ctx_key not in context_to_filename:
+                safe_title = "".join(c for c in title if c.isalnum() or c in (" ", "_", "-")).strip()[:20]
+                h = hashlib.sha256(ctx_key.encode("utf-8")).hexdigest()[:8]
+                fname = f"doc_{len(context_to_filename)}_{safe_title}_{h}.txt"
+                context_to_filename[ctx_key] = fname
+                corpus[fname] = context
+            item_expected.append([context_to_filename[ctx_key]])
         return corpus, item_expected
     else:
         item_expected = [
@@ -251,10 +257,14 @@ def run_experiment(
         print(f"  Provider: {provider} | Model: {model or 'default'}")
 
     corpus, item_expectations = get_corpus_and_expectations(dataset_name, items)
-    print(f"Uploading {len(corpus)} documents to tenant: {tenant_id}")
-    for filename, text in corpus.items():
+    print(f"Uploading {len(corpus)} documents to tenant: {tenant_id}...")
+    batch_size = 50 if len(corpus) > 200 else 1
+    for i, (filename, text) in enumerate(corpus.items(), start=1):
         res = backend.upload(tenant_id, filename, text)
-        print(f"  ✓ {filename}: {res.get('chunks', 0)} chunk(s)")
+        if batch_size == 1:
+            print(f"  ✓ {filename}: {res.get('chunks', 0)} chunk(s)")
+        elif i % batch_size == 0 or i == len(corpus):
+            print(f"  ✓ Uploaded {i}/{len(corpus)} documents ({i/len(corpus)*100:.1f}%)")
 
     print(f"\nEvaluating {len(items)} dataset items...")
     eval_cases = []
