@@ -69,9 +69,10 @@ DEFAULT_PROVIDER = "openai"
 
 
 def asking_headers() -> dict:
-    """The shared secret, plus this session's own key and model if it gave any.
+    """The caller's own key and model, if configured.
 
-    Only questions carry them: uploads are embedded on the operator's key,
+    Sent on /query and /query/stream so the model call goes against their
+    quota. Uploads still use HEADERS (the shared secret, if one is configured)
     because the collection is bound to one embedding model.
     """
     headers = dict(HEADERS)
@@ -84,6 +85,17 @@ def asking_headers() -> dict:
         provider = st.session_state.get("own_provider", "")
         if provider and provider != DEFAULT_PROVIDER:
             headers[PROVIDER_HEADER] = provider
+
+    reranker = st.session_state.get("own_reranker", "none")
+    if reranker and reranker != "none":
+        headers[RERANKER_PROVIDER_HEADER] = reranker
+        r_key = st.session_state.get("own_reranker_key", "").strip()
+        if r_key:
+            headers[RERANKER_KEY_HEADER] = r_key
+        r_model = st.session_state.get("own_reranker_model", "").strip()
+        if r_model:
+            headers[RERANKER_MODEL_HEADER] = r_model
+
     return headers
 
 
@@ -312,6 +324,18 @@ with st.sidebar:
                  "Empty means the assistant's own.",
             disabled=not st.session_state["own_key"],
         )
+
+    with st.expander("🎯 Cross-Encoder Reranker", expanded=False):
+        st.caption("Re-ranks top candidate chunks using query-document cross-attention.")
+        st.selectbox(
+            "Provider",
+            ["none", "flashrank", "cohere"],
+            key="own_reranker",
+            help="flashrank runs locally via fast ONNX; cohere uses Cohere Rerank API.",
+        )
+        if st.session_state.get("own_reranker") == "cohere":
+            st.text_input("Cohere API Key", type="password", key="own_reranker_key")
+            st.text_input("Model", key="own_reranker_model", placeholder="rerank-v3.5")
 
     st.divider()
 
@@ -545,7 +569,10 @@ def render_feedback(index, turn):
 def render_sources(sources):
     with st.expander(f"📚 {len(sources)} source(s)"):
         for src in sources:
-            st.markdown(f"**{src['source']}**")
+            score_str = ""
+            if "rerank_score" in src:
+                score_str = f" *(relevance: {src['rerank_score']:.3f})*"
+            st.markdown(f"**{src['source']}**{score_str}")
             st.caption(src["preview"])
 
 

@@ -80,6 +80,9 @@ class BackendClient:
         provider: str = None,
         model: str = None,
         model_key: str = None,
+        reranker_provider: str = None,
+        reranker_key: str = None,
+        reranker_model: str = None,
     ) -> dict:
         headers = {"X-Request-ID": trace_id}
         # Only attach BYOK headers when an explicit client key is provided
@@ -89,6 +92,13 @@ class BackendClient:
             if model:
                 headers["X-Model"] = model
             headers["X-Model-Key"] = model_key
+
+        if reranker_provider and reranker_provider != "none":
+            headers["X-Reranker-Provider"] = reranker_provider
+            if reranker_key:
+                headers["X-Reranker-Key"] = reranker_key
+            if reranker_model:
+                headers["X-Reranker-Model"] = reranker_model
 
         body = json.dumps(
             {"question": question, "language": language, "user_id": user_id}
@@ -218,12 +228,16 @@ def run_experiment(
     provider: Optional[str] = None,
     model: Optional[str] = None,
     model_key: Optional[str] = None,
+    reranker: Optional[str] = None,
+    reranker_key: Optional[str] = None,
+    reranker_model: Optional[str] = None,
     keep_tenant: bool = False,
 ):
     dataset = sync_dataset_items(langfuse_client, dataset_name)
     if not run_name:
         model_tag = model or "default"
-        run_name = f"eval-{model_tag}-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        rerank_tag = f"-{reranker}" if reranker and reranker != "none" else ""
+        run_name = f"eval-{model_tag}{rerank_tag}-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
     items = dataset.items
     if limit:
@@ -259,6 +273,9 @@ def run_experiment(
                 provider=provider,
                 model=model,
                 model_key=model_key,
+                reranker_provider=reranker,
+                reranker_key=reranker_key,
+                reranker_model=reranker_model,
             )
         except Exception as err:
             print(f"  [{idx}/{len(items)}] ERROR: {err}")
@@ -277,12 +294,17 @@ def run_experiment(
         print(f"  [{idx}/{len(items)}] [{hit_label}] {q[:50]:52} -> {retrieved_sources} ({latency_ms:.0f}ms)")
 
         # Link trace to Langfuse dataset item and run
+        meta = {"provider": provider or "default", "model": model or "default"}
+        if reranker and reranker != "none":
+            meta["reranker"] = reranker
+            if reranker_model:
+                meta["reranker_model"] = reranker_model
         item.link(
             trace_or_observation=None,
             trace_id=trace_id,
             run_name=run_name,
-            run_description=f"Evaluation run {run_name} (model={model or 'default'})",
-            run_metadata={"provider": provider or "default", "model": model or "default"},
+            run_description=f"Evaluation run {run_name} (model={model or 'default'}, reranker={reranker or 'none'})",
+            run_metadata=meta,
         )
 
         # Log boolean passed status with colored True/False badge in Langfuse UI:
@@ -353,6 +375,9 @@ def main(argv=None):
     parser.add_argument("--provider", default=None, help="Model provider (e.g. deepseek, openai, anthropic)")
     parser.add_argument("--model", default=None, help="Model name (e.g. deepseek-flash, gpt-4o)")
     parser.add_argument("--model-key", default=None, help="API key for the custom provider")
+    parser.add_argument("--reranker", default="none", choices=["none", "flashrank", "cohere"], help="Reranker provider")
+    parser.add_argument("--reranker-key", default="", help="API key for Cohere reranker")
+    parser.add_argument("--reranker-model", default="", help="Model override for reranker")
     parser.add_argument("--keep", action="store_true", help="Keep scratch tenant documents")
     parser.add_argument("--sync-only", action="store_true", help="Only sync dataset items without running")
     args = parser.parse_args(argv)
@@ -374,6 +399,9 @@ def main(argv=None):
             provider=args.provider,
             model=args.model,
             model_key=args.model_key,
+            reranker=args.reranker,
+            reranker_key=args.reranker_key,
+            reranker_model=args.reranker_model,
             keep_tenant=args.keep,
         )
     except urllib.error.URLError as err:
