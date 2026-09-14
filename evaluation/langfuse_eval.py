@@ -83,6 +83,7 @@ class BackendClient:
         reranker_provider: str = None,
         reranker_key: str = None,
         reranker_model: str = None,
+        metadata_filter: dict = None,
     ) -> dict:
         headers = {"X-Request-ID": trace_id}
         # Only attach BYOK headers when an explicit client key is provided
@@ -100,9 +101,10 @@ class BackendClient:
             if reranker_model:
                 headers["X-Reranker-Model"] = reranker_model
 
-        body = json.dumps(
-            {"question": question, "language": language, "user_id": user_id}
-        ).encode("utf-8")
+        payload = {"question": question, "language": language, "user_id": user_id}
+        if metadata_filter:
+            payload["metadata_filter"] = metadata_filter
+        body = json.dumps(payload).encode("utf-8")
         data, _ = self._request(
             "POST",
             "/query",

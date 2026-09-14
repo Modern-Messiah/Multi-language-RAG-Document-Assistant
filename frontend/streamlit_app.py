@@ -337,6 +337,12 @@ with st.sidebar:
             st.text_input("Cohere API Key", type="password", key="own_reranker_key")
             st.text_input("Model", key="own_reranker_model", placeholder="rerank-v3.5")
 
+    with st.expander("🏷️ Metadata Filter", expanded=False):
+        st.caption("Restrict retrieval to specific company, year, or document type.")
+        st.text_input("Company / Ticker", key="filter_company", placeholder="e.g. WALMART, VERIZON")
+        st.text_input("Year", key="filter_year", placeholder="e.g. 2020, 2022")
+        st.selectbox("Document Type", ["All", "10-K", "10-Q", "8-K", "EARNINGS"], key="filter_doc_type")
+
     st.divider()
 
     # =========================
@@ -570,9 +576,13 @@ def render_sources(sources):
     with st.expander(f"📚 {len(sources)} source(s)"):
         for src in sources:
             score_str = ""
-            if "rerank_score" in src:
+            if "rerank_score" in src and src["rerank_score"] is not None:
                 score_str = f" *(relevance: {src['rerank_score']:.3f})*"
-            st.markdown(f"**{src['source']}**{score_str}")
+            meta_str = ""
+            if "metadata" in src and src["metadata"]:
+                tags = [f"`{k}: {v}`" for k, v in src["metadata"].items()]
+                meta_str = f" [{' '.join(tags)}]"
+            st.markdown(f"**{src['source']}**{score_str}{meta_str}")
             st.caption(src["preview"])
 
 
@@ -606,6 +616,17 @@ if question and question.strip():
     with st.chat_message("user"):
         st.markdown(question)
 
+    metadata_filter = {}
+    f_comp = st.session_state.get("filter_company", "").strip()
+    if f_comp:
+        metadata_filter["company"] = f_comp.upper()
+    f_yr = st.session_state.get("filter_year", "").strip()
+    if f_yr and f_yr.isdigit():
+        metadata_filter["year"] = int(f_yr)
+    f_type = st.session_state.get("filter_doc_type", "All")
+    if f_type and f_type != "All":
+        metadata_filter["doc_type"] = f_type
+
     payload = {
         "question": question,
         "language": language,
@@ -617,6 +638,8 @@ if question and question.strip():
             for t in transcript[-HISTORY_TURNS_SENT:]
         ],
     }
+    if metadata_filter:
+        payload["metadata_filter"] = metadata_filter
 
     with st.chat_message("assistant"):
         # The response is opened before streaming so an ordinary failure is
