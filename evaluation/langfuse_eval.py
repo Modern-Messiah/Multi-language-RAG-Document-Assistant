@@ -108,14 +108,17 @@ class BackendClient:
 
 
 def sync_dataset_items(langfuse_client, dataset_name: str = DATASET_NAME):
-    """Ensure all golden cases exist in the Langfuse dataset."""
+    """Ensure dataset exists and is populated."""
     try:
         dataset = langfuse_client.get_dataset(dataset_name)
     except Exception:
         dataset = langfuse_client.create_dataset(
             name=dataset_name,
-            description="Golden evaluation dataset for multilingual RAG pipeline",
+            description=f"Evaluation dataset {dataset_name}",
         )
+
+    if dataset_name != DATASET_NAME:
+        return dataset
 
     existing_questions = {
         item.input.get("question")
@@ -158,10 +161,50 @@ def sync_dataset_items(langfuse_client, dataset_name: str = DATASET_NAME):
     if added > 0:
         langfuse_client.flush()
         print(f"Added {added} new item(s) to dataset '{dataset_name}'.")
-    else:
-        print(f"Dataset '{dataset_name}' is already up to date ({len(existing_questions)} items).")
 
     return langfuse_client.get_dataset(dataset_name)
+
+
+def get_corpus_and_expectations(dataset_name: str, items: list):
+    """Return {filename: content} and list of expected sources per item."""
+    if dataset_name == "eval-financebench":
+        corpus = {}
+        item_expected = []
+        for item in items:
+            doc_name = (item.metadata or {}).get("doc_name") or "report"
+            evidence_list = (item.expected_output or {}).get("evidence", [])
+            doc_sources = []
+            if not evidence_list:
+                filename = f"{doc_name}.txt"
+                corpus[filename] = f"Financial filing for {doc_name}."
+                doc_sources.append(filename)
+            else:
+                for idx, ev in enumerate(evidence_list):
+                    text = ev.get("evidence_text", "")
+                    if text:
+                        fname = f"{doc_name}_p{ev.get('evidence_page_num', idx)}.txt"
+                        corpus[fname] = text
+                        doc_sources.append(fname)
+            item_expected.append(doc_sources)
+        return corpus, item_expected
+    elif dataset_name == "eval-sberquad-ru":
+        corpus = {}
+        item_expected = []
+        for idx, item in enumerate(items):
+            title = (item.metadata or {}).get("title") or f"doc_{idx}"
+            context = (item.metadata or {}).get("context") or ""
+            safe_title = "".join(c for c in title if c.isalnum() or c in (" ", "_", "-")).strip()[:30]
+            fname = f"doc_{idx}_{safe_title}.txt"
+            corpus[fname] = context
+            item_expected.append([fname])
+        return corpus, item_expected
+    else:
+        item_expected = [
+            item.expected_output.get("expected_sources", [])
+            if isinstance(item.expected_output, dict) else []
+            for item in items
+        ]
+        return CORPUS, item_expected
 
 
 def run_experiment(
@@ -181,18 +224,20 @@ def run_experiment(
         model_tag = model or "default"
         run_name = f"eval-{model_tag}-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
-    tenant_id = f"eval-{uuid.uuid4().hex[:12]}"
-    print(f"\n🚀 Starting Langfuse Experiment Run: '{run_name}'")
-    if provider:
-        print(f"  Provider: {provider} | Model: {model or 'default'}")
-    print(f"Uploading {len(CORPUS)} documents to tenant: {tenant_id}")
-    for filename, text in CORPUS.items():
-        res = backend.upload(tenant_id, filename, text)
-        print(f"  ✓ {filename}: {res.get('chunks', 0)} chunk(s)")
-
     items = dataset.items
     if limit:
         items = items[:limit]
+
+    tenant_id = f"eval-{uuid.uuid4().hex[:12]}"
+    print(f"\n🚀 Starting Langfuse Experiment Run: '{run_name}' on '{dataset_name}'")
+    if provider:
+        print(f"  Provider: {provider} | Model: {model or 'default'}")
+
+    corpus, item_expectations = get_corpus_and_expectations(dataset_name, items)
+    print(f"Uploading {len(corpus)} documents to tenant: {tenant_id}")
+    for filename, text in corpus.items():
+        res = backend.upload(tenant_id, filename, text)
+        print(f"  ✓ {filename}: {res.get('chunks', 0)} chunk(s)")
 
     print(f"\nEvaluating {len(items)} dataset items...")
     eval_cases = []
@@ -200,11 +245,7 @@ def run_experiment(
 
     for idx, item in enumerate(items, start=1):
         q = item.input.get("question") if isinstance(item.input, dict) else str(item.input)
-        expected_sources = (
-            item.expected_output.get("expected_sources", [])
-            if isinstance(item.expected_output, dict)
-            else []
-        )
+        expected_sources = item_expectations[idx - 1]
         is_negative = not bool(expected_sources)
 
         trace_id = uuid.uuid4().hex[:16]
