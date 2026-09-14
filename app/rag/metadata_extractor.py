@@ -125,6 +125,15 @@ def extract_document_metadata(filename: str, text: Optional[str] = None) -> Dict
                 metadata["doc_type"] = raw_type
             break
 
+    if "doc_type" not in metadata and text:
+        t_text = re.search(r"\b(10-?K|10-?Q|8-?K|EARNINGS)\b", text[:500], re.IGNORECASE)
+        if t_text:
+            raw_type = t_text.group(1).upper().replace("-", "")
+            if raw_type in ("10K", "10Q", "8K"):
+                metadata["doc_type"] = f"{raw_type[:2]}-{raw_type[2:]}"
+            else:
+                metadata["doc_type"] = raw_type
+
     return metadata
 
 
