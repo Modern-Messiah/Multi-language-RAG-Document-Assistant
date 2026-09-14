@@ -147,9 +147,11 @@ def extract_document_metadata(filename: str, text: Optional[str] = None) -> Dict
     for token in parts:
         t_m = re.search(r"\b(10K|10Q|8K|EARNINGS)\b", token, re.IGNORECASE)
         if t_m:
-            raw_type = t_m.group(1).upper()
-            if raw_type in ("10K", "10Q", "8K"):
-                metadata["doc_type"] = f"{raw_type[:2]}-{raw_type[2:]}"
+            raw_type = t_m.group(1).upper().replace("-", "")
+            if raw_type in ("10K", "10Q"):
+                metadata["doc_type"] = f"10-{raw_type[2:]}"
+            elif raw_type == "8K":
+                metadata["doc_type"] = "8-K"
             else:
                 metadata["doc_type"] = raw_type
             break
@@ -158,8 +160,10 @@ def extract_document_metadata(filename: str, text: Optional[str] = None) -> Dict
         t_text = re.search(r"\b(10-?K|10-?Q|8-?K|EARNINGS)\b", text[:500], re.IGNORECASE)
         if t_text:
             raw_type = t_text.group(1).upper().replace("-", "")
-            if raw_type in ("10K", "10Q", "8K"):
-                metadata["doc_type"] = f"{raw_type[:2]}-{raw_type[2:]}"
+            if raw_type in ("10K", "10Q"):
+                metadata["doc_type"] = f"10-{raw_type[2:]}"
+            elif raw_type == "8K":
+                metadata["doc_type"] = "8-K"
             else:
                 metadata["doc_type"] = raw_type
 
@@ -206,8 +210,10 @@ def extract_query_metadata(
     type_match = DOC_TYPE_PATTERN.search(query)
     if type_match:
         raw_type = type_match.group(1).upper().replace("-", "")
-        if raw_type in ("10K", "10Q", "8K"):
-            filters["doc_type"] = f"{raw_type[:2]}-{raw_type[2:]}"
+        if raw_type in ("10K", "10Q"):
+            filters["doc_type"] = f"10-{raw_type[2:]}"
+        elif raw_type == "8K":
+            filters["doc_type"] = "8-K"
         else:
             filters["doc_type"] = raw_type
 
