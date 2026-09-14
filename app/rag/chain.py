@@ -5,7 +5,7 @@ RAG Chain: Retrieval-Augmented Generation
 import logging
 import os
 import re
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 from langchain.schema import Document
@@ -108,6 +108,7 @@ class RAGChain:
         tracer=None,
         reranker=None,
         retrieval_candidates: Optional[int] = None,
+        metadata_filtering_enabled: Optional[bool] = None,
     ):
         """
         Args:
@@ -147,6 +148,11 @@ class RAGChain:
             retrieval_candidates
             if retrieval_candidates is not None
             else os.getenv("RETRIEVAL_CANDIDATES", 20)
+        )
+        self.metadata_filtering_enabled = (
+            metadata_filtering_enabled
+            if metadata_filtering_enabled is not None
+            else os.getenv("METADATA_FILTERING_ENABLED", "true").lower() in ("true", "1", "yes")
         )
 
         if client is not None:
@@ -470,6 +476,13 @@ class RAGChain:
             }
             if "rerank_score" in doc.metadata:
                 entry["rerank_score"] = doc.metadata["rerank_score"]
+            meta = {
+                k: doc.metadata[k]
+                for k in ("company", "year", "quarter", "doc_type")
+                if k in doc.metadata
+            }
+            if meta:
+                entry["metadata"] = meta
             sources.append(entry)
 
         return sources
@@ -484,6 +497,7 @@ class RAGChain:
         model=None,
         trace=None,
         reranker=None,
+        metadata_filter: Optional[Dict[str, Any]] = None,
     ):
         """Retrieve and build the chat request.
 
@@ -499,7 +513,14 @@ class RAGChain:
         if not user_id:
             raise ValueError("user_id is required for retrieval")
 
-        filter_dict = {"user_id": user_id}
+        # Resolve metadata filter
+        resolved_filter = dict(metadata_filter) if metadata_filter else {}
+        if not resolved_filter and self.metadata_filtering_enabled:
+            from app.rag.metadata_extractor import extract_query_metadata
+            resolved_filter = extract_query_metadata(question)
+
+        from app.rag.metadata_extractor import build_chroma_filter
+        filter_dict = build_chroma_filter(user_id, resolved_filter)
         trace_handle = trace or NoOpTraceHandle()
 
         # Retrieve on the standalone form, answer the question as asked. The
@@ -510,6 +531,10 @@ class RAGChain:
         if search_query != question:
             condense_span = trace_handle.span("query_condense", input={"question": question})
             condense_span.end(output={"rewritten": search_query})
+            if not resolved_filter and self.metadata_filtering_enabled:
+                from app.rag.metadata_extractor import extract_query_metadata
+                resolved_filter = extract_query_metadata(search_query)
+                filter_dict = build_chroma_filter(user_id, resolved_filter)
 
         active_reranker = reranker if reranker is not None else self.reranker
         fetch_k = (
@@ -518,12 +543,26 @@ class RAGChain:
             else self.top_k
         )
 
-        retrieval_span = trace_handle.span("retrieval", input={"query": search_query, "k": fetch_k})
+        retrieval_span = trace_handle.span(
+            "retrieval",
+            input={"query": search_query, "k": fetch_k, "filter": filter_dict},
+        )
         docs = self._retrieve(search_query, filter_dict, k=fetch_k)
+
+        # Fallback to tenant-wide search if metadata filter yielded 0 candidates
+        if not docs and resolved_filter:
+            logger.info(
+                "Metadata filter %s yielded 0 results; falling back to tenant-wide search",
+                resolved_filter,
+            )
+            fallback_filter = {"user_id": user_id}
+            docs = self._retrieve(search_query, fallback_filter, k=fetch_k)
+
         retrieval_span.end(
             output={
                 "count": len(docs),
                 "sources": [d.metadata.get("source", "unknown") for d in docs],
+                "filter_used": filter_dict,
             }
         )
 
@@ -601,6 +640,7 @@ Answer:
         model=None,
         trace=None,
         reranker=None,
+        metadata_filter: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         """Answer one question.
 
@@ -610,7 +650,15 @@ Answer:
         """
         trace_handle = trace or NoOpTraceHandle()
         request, sources = self._prepare(
-            question, language, user_id, history, client, model, trace=trace_handle, reranker=reranker
+            question,
+            language,
+            user_id,
+            history,
+            client,
+            model,
+            trace=trace_handle,
+            reranker=reranker,
+            metadata_filter=metadata_filter,
         )
 
         if request is None:
@@ -671,6 +719,7 @@ Answer:
         model=None,
         trace=None,
         reranker=None,
+        metadata_filter: Optional[Dict[str, Any]] = None,
     ):
         """Yield the answer as it is generated.
 
@@ -687,7 +736,15 @@ Answer:
         """
         trace_handle = trace or NoOpTraceHandle()
         request, sources = self._prepare(
-            question, language, user_id, history, client, model, trace=trace_handle, reranker=reranker
+            question,
+            language,
+            user_id,
+            history,
+            client,
+            model,
+            trace=trace_handle,
+            reranker=reranker,
+            metadata_filter=metadata_filter,
         )
 
         if request is None:

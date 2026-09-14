@@ -202,6 +202,7 @@ async def lifespan(app: FastAPI):
         tracer=app.state.tracer,
         reranker=app.state.reranker,
         retrieval_candidates=settings.retrieval_candidates,
+        metadata_filtering_enabled=settings.metadata_filtering_enabled,
     )
     yield
     app.state.tracer.flush()
@@ -419,11 +420,14 @@ def _store_and_index(state, settings, user_id, safe_name, file_hash, contents) -
             detail="Document contains no extractable text"
         )
 
-    # 🏷 Metadata: human-readable source, content hash, owner
+    # 🏷 Metadata: human-readable source, content hash, owner, and extracted tags
+    from app.rag.metadata_extractor import extract_document_metadata
+    doc_metadata = extract_document_metadata(safe_name, chunks[0].page_content if chunks else None)
     for chunk in chunks:
         chunk.metadata["source"] = safe_name
         chunk.metadata["file_hash"] = file_hash
         chunk.metadata["user_id"] = user_id
+        chunk.metadata.update(doc_metadata)
 
     # 📦 Deterministic per-owner IDs. Chroma UPSERTS on an existing ID
     # (it does not skip), but user_id is validated and used raw, so IDs
@@ -631,6 +635,7 @@ def query_rag(request: Request, payload: QueryRequest):
             model=model,
             trace=trace,
             reranker=caller_reranker,
+            metadata_filter=payload.metadata_filter,
         )
     except RateLimitError as exc:
         if client:
@@ -740,6 +745,7 @@ def query_rag_stream(request: Request, payload: QueryRequest):
         model=model,
         trace=trace,
         reranker=caller_reranker,
+        metadata_filter=payload.metadata_filter,
     )
 
     try:
