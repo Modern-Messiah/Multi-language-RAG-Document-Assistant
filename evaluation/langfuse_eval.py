@@ -1,0 +1,290 @@
+"""Run golden evaluation dataset against backend and record experiment in Langfuse.
+
+This script links the local golden test suite (multilingual questions and corpus)
+with Langfuse's "Datasets & Experiments" feature.
+
+Usage:
+    python -m evaluation.langfuse_eval --run-name baseline-v1
+"""
+import argparse
+import datetime
+import json
+import logging
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+from typing import Optional
+
+from dotenv import load_dotenv
+
+from evaluation.golden import CORPUS, GOLDEN_CASES, UNANSWERABLE
+from evaluation.metrics import aggregate, hit_at_k, precision_at_k, recall_at_k
+
+logger = logging.getLogger("langfuse_eval")
+DEFAULT_URL = "http://127.0.0.1:8000"
+DATASET_NAME = "multilingual-rag-golden"
+
+
+class BackendClient:
+    """Simple HTTP client for backend interaction."""
+
+    def __init__(self, base_url: str, api_key: str = "", timeout: float = 120.0):
+        self.base_url = base_url.rstrip("/")
+        self.headers = {"X-API-Key": api_key} if api_key else {}
+        self.timeout = timeout
+
+    def _request(self, method: str, path: str, params=None, body=None, content_type=None, extra_headers=None):
+        url = f"{self.base_url}{path}"
+        if params:
+            url += "?" + urllib.parse.urlencode(params)
+        headers = dict(self.headers)
+        if content_type:
+            headers["Content-Type"] = content_type
+        if extra_headers:
+            headers.update(extra_headers)
+
+        request = urllib.request.Request(url, data=body, headers=headers, method=method)
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            payload = response.read()
+            resp_headers = dict(response.headers)
+        return (json.loads(payload) if payload else {}), resp_headers
+
+    def upload(self, user_id: str, filename: str, text: str) -> dict:
+        boundary = f"----eval{uuid.uuid4().hex}"
+        body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+            "Content-Type: text/plain\r\n\r\n"
+            f"{text}\r\n"
+            f"--{boundary}--\r\n"
+        ).encode("utf-8")
+        data, _ = self._request(
+            "POST",
+            "/upload",
+            {"user_id": user_id},
+            body,
+            f"multipart/form-data; boundary={boundary}",
+        )
+        return data
+
+    def query(self, user_id: str, question: str, trace_id: str, language: str = "Auto") -> dict:
+        body = json.dumps(
+            {"question": question, "language": language, "user_id": user_id}
+        ).encode("utf-8")
+        data, headers = self._request(
+            "POST",
+            "/query",
+            None,
+            body,
+            "application/json",
+            extra_headers={"X-Request-ID": trace_id},
+        )
+        return data
+
+    def clear(self, user_id: str) -> dict:
+        data, _ = self._request("POST", "/clear", {"user_id": user_id})
+        return data
+
+
+def sync_dataset_items(langfuse_client, dataset_name: str = DATASET_NAME):
+    """Ensure all golden cases exist in the Langfuse dataset."""
+    try:
+        dataset = langfuse_client.get_dataset(dataset_name)
+    except Exception:
+        dataset = langfuse_client.create_dataset(
+            name=dataset_name,
+            description="Golden evaluation dataset for multilingual RAG pipeline",
+        )
+
+    existing_questions = {
+        item.input.get("question")
+        for item in (dataset.items or [])
+        if isinstance(item.input, dict)
+    }
+
+    added = 0
+    for case in GOLDEN_CASES:
+        q = case["question"]
+        if q not in existing_questions:
+            langfuse_client.create_dataset_item(
+                dataset_name=dataset_name,
+                input={"question": q},
+                expected_output={"expected_sources": case["expected"]},
+                metadata={
+                    "type": "answerable",
+                    "note": case.get("note", ""),
+                    "language": "ru" if any(c in q for c in "абвгдеёжзийклмнопрстуфхцчшщъыьэюя") else "en",
+                },
+            )
+            existing_questions.add(q)
+            added += 1
+
+    for q in UNANSWERABLE:
+        if q not in existing_questions:
+            langfuse_client.create_dataset_item(
+                dataset_name=dataset_name,
+                input={"question": q},
+                expected_output={"expected_sources": []},
+                metadata={
+                    "type": "unanswerable",
+                    "note": "Negative case - should retrieve nothing or fall back",
+                    "language": "ru" if any(c in q for c in "абвгдеёжзийклмнопрстуфхцчшщъыьэюя") else "en",
+                },
+            )
+            existing_questions.add(q)
+            added += 1
+
+    if added > 0:
+        langfuse_client.flush()
+        print(f"Added {added} new item(s) to dataset '{dataset_name}'.")
+    else:
+        print(f"Dataset '{dataset_name}' is already up to date ({len(existing_questions)} items).")
+
+    return langfuse_client.get_dataset(dataset_name)
+
+
+def run_experiment(
+    backend: BackendClient,
+    langfuse_client,
+    dataset_name: str = DATASET_NAME,
+    run_name: Optional[str] = None,
+    top_k: int = 3,
+    keep_tenant: bool = False,
+):
+    dataset = sync_dataset_items(langfuse_client, dataset_name)
+    if not run_name:
+        run_name = f"eval-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+    tenant_id = f"eval-{uuid.uuid4().hex[:12]}"
+    print(f"\n🚀 Starting Langfuse Experiment Run: '{run_name}'")
+    print(f"Uploading {len(CORPUS)} documents to tenant: {tenant_id}")
+    for filename, text in CORPUS.items():
+        res = backend.upload(tenant_id, filename, text)
+        print(f"  ✓ {filename}: {res.get('chunks', 0)} chunk(s)")
+
+    print(f"\nEvaluating {len(dataset.items)} dataset items...")
+    eval_cases = []
+    start_all = time.time()
+
+    for idx, item in enumerate(dataset.items, start=1):
+        q = item.input.get("question") if isinstance(item.input, dict) else str(item.input)
+        expected_sources = (
+            item.expected_output.get("expected_sources", [])
+            if isinstance(item.expected_output, dict)
+            else []
+        )
+        is_negative = not bool(expected_sources)
+
+        trace_id = uuid.uuid4().hex[:16]
+        t0 = time.perf_counter()
+        try:
+            answer = backend.query(tenant_id, q, trace_id=trace_id)
+        except Exception as err:
+            print(f"  [{idx}/{len(dataset.items)}] ERROR: {err}")
+            continue
+        latency_ms = (time.perf_counter() - t0) * 1000.0
+
+        retrieved_sources = [s["source"] for s in answer.get("sources", [])]
+        eval_cases.append({"expected": expected_sources, "retrieved": retrieved_sources})
+
+        # Calculate scores
+        hit = hit_at_k(expected_sources, retrieved_sources, top_k) if not is_negative else (len(retrieved_sources) == 0)
+        prec = precision_at_k(expected_sources, retrieved_sources, top_k) if not is_negative else 1.0
+        rec = recall_at_k(expected_sources, retrieved_sources, top_k) if not is_negative else 1.0
+
+        hit_label = "PASS" if hit else "FAIL"
+        print(f"  [{idx}/{len(dataset.items)}] [{hit_label}] {q[:50]:52} -> {retrieved_sources} ({latency_ms:.0f}ms)")
+
+        # Link trace to Langfuse dataset item and run
+        item.link(
+            trace_or_observation=None,
+            trace_id=trace_id,
+            run_name=run_name,
+            run_description=f"Evaluation run {run_name}",
+        )
+
+        # Log metrics to Langfuse
+        langfuse_client.score(
+            trace_id=trace_id,
+            name="retrieval_hit",
+            value=1.0 if hit else 0.0,
+            comment=f"expected={expected_sources}, retrieved={retrieved_sources}",
+        )
+        if not is_negative:
+            langfuse_client.score(
+                trace_id=trace_id,
+                name=f"precision@{top_k}",
+                value=float(prec),
+            )
+            langfuse_client.score(
+                trace_id=trace_id,
+                name=f"recall@{top_k}",
+                value=float(rec),
+            )
+        langfuse_client.score(
+            trace_id=trace_id,
+            name="latency_ms",
+            value=float(latency_ms),
+        )
+
+    langfuse_client.flush()
+    total_time = time.time() - start_all
+
+    print("\n--- Aggregate Metrics ---")
+    summary = aggregate(eval_cases, k=top_k)
+    for k, v in summary.items():
+        print(f"  {k:16}: {v:.3f}" if isinstance(v, float) else f"  {k:16}: {v}")
+    print(f"  Total Duration  : {total_time:.2f}s")
+
+    if not keep_tenant:
+        backend.clear(tenant_id)
+        print(f"\nCleared temporary tenant {tenant_id}.")
+    else:
+        print(f"\nKept tenant {tenant_id} as requested.")
+
+    print(f"\n✅ Experiment '{run_name}' completed and synced to Langfuse!")
+    print(f"Open Langfuse UI -> Datasets -> '{dataset_name}' -> Runs to view full results.")
+
+
+def main(argv=None):
+    load_dotenv()
+    from langfuse import Langfuse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    default_key = os.getenv("BACKEND_API_KEY", "")
+    parser.add_argument("--url", default=DEFAULT_URL, help="Backend URL")
+    parser.add_argument("--api-key", default=default_key, help="X-API-Key for backend (defaults to BACKEND_API_KEY from .env)")
+    parser.add_argument("--dataset", default=DATASET_NAME, help="Dataset name in Langfuse")
+    parser.add_argument("--run-name", default=None, help="Name of experiment run")
+    parser.add_argument("--top-k", type=int, default=3, help="Top-K for precision and recall")
+    parser.add_argument("--keep", action="store_true", help="Keep scratch tenant documents")
+    parser.add_argument("--sync-only", action="store_true", help="Only sync dataset items without running")
+    args = parser.parse_args(argv)
+
+    client = Langfuse()
+    if args.sync_only:
+        sync_dataset_items(client, args.dataset)
+        return 0
+
+    backend = BackendClient(args.url, args.api_key)
+    try:
+        run_experiment(
+            backend=backend,
+            langfuse_client=client,
+            dataset_name=args.dataset,
+            run_name=args.run_name,
+            top_k=args.top_k,
+            keep_tenant=args.keep,
+        )
+    except urllib.error.URLError as err:
+        print(f"Failed to connect to backend at {args.url}: {err}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
