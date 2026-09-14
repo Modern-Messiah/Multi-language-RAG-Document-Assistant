@@ -161,16 +161,15 @@ def extract_query_metadata(
             filters["company"] = comp_norm
             break
 
-    # 2. Detect Year
-    # Look for FY2020 / FY 2020 / FY19 / FY 19
-    fy_match = FY_YEAR_PATTERN.search(query)
-    if fy_match:
-        raw_yr = fy_match.group(1)
-        filters["year"] = int(f"20{raw_yr}" if len(raw_yr) == 2 else raw_yr)
-    else:
-        year_match = YEAR_PATTERN.search(query)
-        if year_match:
-            filters["year"] = int(year_match.group(1))
+    # 2. Detect Year (only filter by year if a single distinct year is referenced;
+    # multi-year questions such as 'FY2018 - FY2020' or 'between 2021 and 2022' should
+    # retrieve across all relevant years for that company).
+    all_years = [int(y) for y in re.findall(r"(?<!\d)(?:19\d\d|20[0-3]\d)(?!\d)", query)]
+    for m in re.finditer(r"\bFY\s*(\d{2})\b", query, re.IGNORECASE):
+        all_years.append(int(f"20{m.group(1)}"))
+    distinct_years = sorted(set(all_years))
+    if len(distinct_years) == 1:
+        filters["year"] = distinct_years[0]
 
     # 3. Detect Quarter
     q_match = QUARTER_PATTERN.search(query)

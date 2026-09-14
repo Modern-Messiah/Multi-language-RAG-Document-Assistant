@@ -78,10 +78,11 @@ def test_extract_query_metadata_from_questions():
     assert m3.get("year") == 2023
     assert m3.get("quarter") == "Q2"
 
-    # Unrelated general question without metadata
-    q4 = "How to bake sourdough bread?"
-    m4 = extract_query_metadata(q4)
-    assert m4 == {}
+    # Multi-year comparative question: filters by company, but leaves year open to prevent false negatives
+    q5 = "What is the FY2018 - FY2020 3 year average unadjusted EBITDA % margin for Walmart?"
+    m5 = extract_query_metadata(q5)
+    assert m5.get("company") == "WALMART"
+    assert "year" not in m5
 
 
 # =========================
