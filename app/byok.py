@@ -95,6 +95,17 @@ def allowed_providers(settings=None) -> list:
     return [name for name in PROVIDERS if name in named]
 
 
+def normalize_model_name(provider: str, model: str) -> str:
+    """Normalize model aliases (e.g. DeepSeek-V4.1-Flash -> deepseek-flash)."""
+    if not model:
+        return model
+    if (provider or "").lower() == "deepseek":
+        cleaned = model.lower().replace("_", "-")
+        if cleaned in ("deepseek-v4.1-flash", "deepseek-v4-flash", "v4.1-flash", "deepseek-chat"):
+            return "deepseek-flash"
+    return model
+
+
 def wanted(headers, settings=None) -> tuple:
     """The (key, model, provider) a caller asked for, validated. Any may be None.
 
@@ -128,11 +139,8 @@ def wanted(headers, settings=None) -> tuple:
                 f"{', '.join(permitted)}."
             )
 
-    # Normalize model aliases (e.g. DeepSeek-V4.1-Flash -> deepseek-flash)
-    if provider == "deepseek" and model:
-        cleaned = model.lower().replace("_", "-")
-        if cleaned in ("deepseek-v4.1-flash", "deepseek-v4-flash", "v4.1-flash"):
-            model = "deepseek-flash"
+    if provider and model:
+        model = normalize_model_name(provider, model)
 
     return (key or None), (model or None), (provider or None)
 

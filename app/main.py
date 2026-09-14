@@ -175,9 +175,17 @@ async def lifespan(app: FastAPI):
     )
     llm_key = settings.llm_api_key or settings.openai_api_key
     llm_url = settings.llm_base_url or settings.openai_base_url
+    server_model = settings.model_name
+    if "deepseek" in (llm_url or "").lower():
+        from app.byok import normalize_model_name
+        if server_model == "gpt-4o-mini":
+            server_model = "deepseek-flash"
+        else:
+            server_model = normalize_model_name("deepseek", server_model)
+
     app.state.rag_chain = RAGChain(
         app.state.vectorstore,
-        model=settings.model_name,
+        model=server_model,
         top_k=settings.top_k_results,
         temperature=settings.temperature,
         api_key=llm_key,
