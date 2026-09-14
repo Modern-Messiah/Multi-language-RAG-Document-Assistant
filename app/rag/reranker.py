@@ -30,6 +30,9 @@ DEFAULT_COHERE_MODEL = "rerank-v3.5"
 COHERE_RERANK_URL = "https://api.cohere.com/v2/rerank"
 
 
+_RANKER_CACHE: Dict[str, Any] = {}
+
+
 class BaseReranker(ABC):
     """Abstract interface for rerankers."""
 
@@ -45,7 +48,7 @@ class BaseReranker(ABC):
 
 
 class NoOpReranker(BaseReranker):
-    """Passthrough reranker that preserves existing vector search ranking."""
+    """Pass-through reranker preserving original retrieval order."""
 
     def rerank(
         self,
@@ -65,15 +68,22 @@ class FlashRankReranker(BaseReranker):
         self._init_error = None
 
     def _get_ranker(self):
-        if self._ranker is None and self._init_error is None:
+        if self._ranker is not None:
+            return self._ranker
+        if self.model_name in _RANKER_CACHE:
+            return _RANKER_CACHE[self.model_name]
+        if self._init_error is None:
             try:
                 from flashrank import Ranker
-                self._ranker = Ranker(model_name=self.model_name)
+                ranker = Ranker(model_name=self.model_name)
+                _RANKER_CACHE[self.model_name] = ranker
+                self._ranker = ranker
                 logger.info("Initialized FlashRank reranker (model=%s)", self.model_name)
+                return ranker
             except Exception as err:
                 self._init_error = err
                 logger.warning("Failed to initialize FlashRank (%s); falling back to NoOp", err)
-        return self._ranker
+        return None
 
     def rerank(
         self,
