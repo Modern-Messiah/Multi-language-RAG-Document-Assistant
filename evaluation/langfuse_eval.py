@@ -82,11 +82,12 @@ class BackendClient:
         model_key: str = None,
     ) -> dict:
         headers = {"X-Request-ID": trace_id}
-        if provider:
-            headers["X-Model-Provider"] = provider
-        if model:
-            headers["X-Model"] = model
+        # Only attach BYOK headers when an explicit client key is provided
         if model_key:
+            if provider:
+                headers["X-Model-Provider"] = provider
+            if model:
+                headers["X-Model"] = model
             headers["X-Model-Key"] = model_key
 
         body = json.dumps(
