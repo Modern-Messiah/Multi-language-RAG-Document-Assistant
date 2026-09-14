@@ -243,11 +243,30 @@ def run_experiment(
             run_metadata={"provider": provider or "default", "model": model or "default"},
         )
 
-        # Log metrics to Langfuse
+        # Log categorical PASS / FAIL status for visual badges in Langfuse UI:
+        langfuse_client.score(
+            trace_id=trace_id,
+            name="status",
+            value="PASS" if hit else "FAIL",
+            data_type="CATEGORICAL",
+            comment=f"expected: {expected_sources}, retrieved: {retrieved_sources}",
+        )
+
+        # Log boolean passed status:
+        langfuse_client.score(
+            trace_id=trace_id,
+            name="passed",
+            value=1 if hit else 0,
+            data_type="BOOLEAN",
+            comment=f"Hit: {hit}",
+        )
+
+        # Log numeric metrics for statistical averages:
         langfuse_client.score(
             trace_id=trace_id,
             name="retrieval_hit",
             value=1.0 if hit else 0.0,
+            data_type="NUMERIC",
             comment=f"expected={expected_sources}, retrieved={retrieved_sources}",
         )
         if not is_negative:
