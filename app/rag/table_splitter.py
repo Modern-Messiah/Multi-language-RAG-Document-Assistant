@@ -194,6 +194,14 @@ class TableAwareSplitter:
         if not segments:
             return []
 
+        # Pure prose fast-path: preserve standard splitter behavior completely
+        if not any(seg.is_table for seg in segments) and self.fallback_splitter:
+            raw_chunks = self.fallback_splitter(text)
+            return [
+                (c, {"contains_table": False, "is_table": False})
+                for c in raw_chunks
+            ]
+
         chunks: List[Tuple[str, dict]] = []
         current_chunk_parts: List[str] = []
         current_chunk_len = 0
@@ -277,18 +285,21 @@ class TableAwareSplitter:
             text = doc.page_content or ""
             chunks_with_meta = self.split_text(text)
 
-            total = len(chunks_with_meta)
-            for idx, (chunk_text, table_meta) in enumerate(chunks_with_meta):
+            for chunk_text, table_meta in chunks_with_meta:
                 meta = dict(doc.metadata)
                 meta.update(table_meta)
-                meta.update(
-                    {
-                        "chunk_id": idx,
-                        "chunk_size": len(chunk_text),
-                        "total_chunks": total,
-                    }
-                )
                 all_chunks.append(Document(page_content=chunk_text, metadata=meta))
+
+        # Assign upload-wide sequential chunk_id and total_chunks across the entire batch
+        total = len(all_chunks)
+        for idx, chunk in enumerate(all_chunks):
+            chunk.metadata.update(
+                {
+                    "chunk_id": idx,
+                    "chunk_size": len(chunk.page_content),
+                    "total_chunks": total,
+                }
+            )
 
         return all_chunks
 

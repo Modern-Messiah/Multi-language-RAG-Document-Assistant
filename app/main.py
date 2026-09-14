@@ -159,6 +159,7 @@ async def lifespan(app: FastAPI):
     app.state.chunker = TextChunker(
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
+        table_aware=settings.table_aware_chunking,
     )
     app.state.embeddings = EmbeddingsManager(
         persist_directory=str(settings.chroma_persist_dir),
