@@ -125,12 +125,19 @@ class Settings(BaseSettings):
 
     # --- Langfuse Observability ---
     # Optional integration with Langfuse (cloud or self-hosted).
-    # When disabled or keys are missing, tracing is a complete no-op with zero
-    # network overhead, which keeps offline tests fast and isolated.
+    # False disables all tracing with zero network overhead.
     langfuse_enabled: bool = False
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
     langfuse_host: str = "https://cloud.langfuse.com"
+
+    # --- Reranking (Cross-Encoder / Cohere / FlashRank) ---
+    # Re-evaluates top candidate chunks with token-level cross-attention before generation.
+    reranker_enabled: bool = False
+    reranker_provider: str = Field(default="none")
+    reranker_model: str = ""
+    reranker_api_key: str = ""
+    retrieval_candidates: int = Field(default=20, ge=1)
 
     @model_validator(mode="after")
     def _api_key_is_header_safe(self) -> "Settings":

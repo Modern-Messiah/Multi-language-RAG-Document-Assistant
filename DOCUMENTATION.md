@@ -880,6 +880,11 @@ variable of the same name, read from `.env` or the process environment.
 | `LANGFUSE_PUBLIC_KEY` | Langfuse public key (from project settings). | `""` |
 | `LANGFUSE_SECRET_KEY` | Langfuse secret key. | `""` |
 | `LANGFUSE_HOST` | Langfuse instance URL. Cloud or self-hosted. | `https://cloud.langfuse.com` |
+| `RERANKER_ENABLED` | Whether cross-encoder reranking is active on candidate chunks. | `False` |
+| `RERANKER_PROVIDER` | Reranker provider: none, flashrank (local ONNX) or cohere (API). | `none` |
+| `RERANKER_MODEL` | Model name override for reranker. Empty uses provider default. | `""` |
+| `RERANKER_API_KEY` | API key for Cohere reranker. Empty if using local FlashRank or none. | `""` |
+| `RETRIEVAL_CANDIDATES` | Candidates fetched from vectorstore before reranking down to TOP_K_RESULTS, `>= 1`. | `20` |
 | `TELEGRAM_BOT_TOKEN` | Required by the bot only; read directly by `clients/telegram_bot.py`. | - |
 | `BACKEND_URL` | Backend base URL used by the frontend and bot. Compose overrides it to `http://backend:8000`. | `http://localhost:8000` |
 
