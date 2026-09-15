@@ -887,6 +887,10 @@ variable of the same name, read from `.env` or the process environment.
 | `RERANKER_API_KEY` | API key for Cohere reranker. Empty if using local FlashRank or none. | `""` |
 | `RETRIEVAL_CANDIDATES` | Candidates fetched from vectorstore before reranking down to TOP_K_RESULTS, `>= 1`. | `20` |
 | `METADATA_FILTERING_ENABLED` | Extract and filter by company, year, and document type in vector search. | `True` |
+| `HYBRID_SEARCH_ENABLED` | Fuse dense vector search and sparse Okapi BM25 keyword matching with RRF. | `True` |
+| `HYBRID_BM25_WEIGHT` | Score weight multiplier for sparse BM25 candidates in RRF fusion. | `1.0` |
+| `HYBRID_DENSE_WEIGHT` | Score weight multiplier for dense vector candidates in RRF fusion. | `1.0` |
+| `HYBRID_RRF_K` | Reciprocal Rank Fusion smoothing parameter, `>= 1`. | `60` |
 | `TELEGRAM_BOT_TOKEN` | Required by the bot only; read directly by `clients/telegram_bot.py`. | - |
 | `BACKEND_URL` | Backend base URL used by the frontend and bot. Compose overrides it to `http://backend:8000`. | `http://localhost:8000` |
 
