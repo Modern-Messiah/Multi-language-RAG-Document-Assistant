@@ -862,9 +862,12 @@ variable of the same name, read from `.env` or the process environment.
 | `OPENAI_TIMEOUT` | Seconds the OpenAI client waits. Keep it below the clients' own timeouts. | `45.0` |
 | `OPENAI_MAX_RETRIES` | Retries the OpenAI client makes on a transient failure. | `2` |
 | `OPENAI_BASE_URL` | Azure or an OpenAI-compatible endpoint (vLLM, Ollama). Empty means api.openai.com. | `""` |
+| `LLM_BASE_URL` | Override base URL for LLM completion calls (e.g. https://api.deepseek.com). Empty falls back to OPENAI_BASE_URL. | `""` |
+| `LLM_API_KEY` | Override API key for LLM completion calls (e.g. DeepSeek key). Empty falls back to OPENAI_API_KEY. | `""` |
 | `ALLOWED_MODEL_PROVIDERS` | Providers a caller may name with their own key, comma separated. Empty means all of them. | `""` |
 | `CHUNK_SIZE` | Characters per chunk, `>= 1`. | `1000` |
 | `CHUNK_OVERLAP` | Overlap between chunks; must be **smaller** than `CHUNK_SIZE`. | `200` |
+| `TABLE_AWARE_CHUNKING` | Preserve markdown/HTML tables intact and repeat headers on split tables. | `True` |
 | `CHROMA_PERSIST_DIR` | ChromaDB storage directory. | `./data/chroma_db` |
 | `COLLECTION_NAME` | ChromaDB collection name. | `documents` |
 | `UPLOAD_DIR` | Where raw uploads are stored. | `data/uploads` |
@@ -874,6 +877,20 @@ variable of the same name, read from `.env` or the process environment.
 | `FEEDBACK_ENABLED` | Whether answers can be rated. Off makes `POST /feedback` answer 404 and creates nothing on disk. | `True` |
 | `FEEDBACK_DIR` | Where `feedback.jsonl` is written. | `data/feedback` |
 | `FEEDBACK_MAX_BYTES` | Cap on that file. At the cap new ratings are refused with 507 instead of filling the volume. | `10485760` (10 MB) |
+| `LANGFUSE_ENABLED` | Whether Langfuse tracing is active. False disables all tracing with zero network overhead. | `False` |
+| `LANGFUSE_PUBLIC_KEY` | Langfuse public key (from project settings). | `""` |
+| `LANGFUSE_SECRET_KEY` | Langfuse secret key. | `""` |
+| `LANGFUSE_HOST` | Langfuse instance URL. Cloud or self-hosted. | `https://cloud.langfuse.com` |
+| `RERANKER_ENABLED` | Whether cross-encoder reranking is active on candidate chunks. | `False` |
+| `RERANKER_PROVIDER` | Reranker provider: none, flashrank (local ONNX) or cohere (API). | `none` |
+| `RERANKER_MODEL` | Model name override for reranker. Empty uses provider default. | `""` |
+| `RERANKER_API_KEY` | API key for Cohere reranker. Empty if using local FlashRank or none. | `""` |
+| `RETRIEVAL_CANDIDATES` | Candidates fetched from vectorstore before reranking down to TOP_K_RESULTS, `>= 1`. | `20` |
+| `METADATA_FILTERING_ENABLED` | Extract and filter by company, year, and document type in vector search. | `True` |
+| `HYBRID_SEARCH_ENABLED` | Fuse dense vector search and sparse Okapi BM25 keyword matching with RRF. | `True` |
+| `HYBRID_BM25_WEIGHT` | Score weight multiplier for sparse BM25 candidates in RRF fusion. | `1.0` |
+| `HYBRID_DENSE_WEIGHT` | Score weight multiplier for dense vector candidates in RRF fusion. | `1.0` |
+| `HYBRID_RRF_K` | Reciprocal Rank Fusion smoothing parameter, `>= 1`. | `60` |
 | `TELEGRAM_BOT_TOKEN` | Required by the bot only; read directly by `clients/telegram_bot.py`. | - |
 | `BACKEND_URL` | Backend base URL used by the frontend and bot. Compose overrides it to `http://backend:8000`. | `http://localhost:8000` |
 

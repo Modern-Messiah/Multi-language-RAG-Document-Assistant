@@ -12,7 +12,15 @@ client, because the two use different libraries: `requests` in Streamlit,
 """
 import os
 
-from app.byok import KEY_HEADER, MODEL_HEADER, PROVIDER_HEADER, PROVIDERS
+from app.byok import (
+    KEY_HEADER,
+    MODEL_HEADER,
+    PROVIDER_HEADER,
+    PROVIDERS,
+    RERANKER_KEY_HEADER,
+    RERANKER_MODEL_HEADER,
+    RERANKER_PROVIDER_HEADER,
+)
 from app.humanize import describe_quota, human_size
 from app.observability import REQUEST_ID_HEADER
 from app.rag.languages import AUTO_LANGUAGE, SUPPORTED_LANGUAGES
@@ -26,6 +34,9 @@ __all__ = [
     "MODEL_HEADER",
     "PROVIDERS",
     "PROVIDER_HEADER",
+    "RERANKER_KEY_HEADER",
+    "RERANKER_MODEL_HEADER",
+    "RERANKER_PROVIDER_HEADER",
     "OPERATOR_ERROR",
     "REQUEST_ID_HEADER",
     "api_headers",
