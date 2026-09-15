@@ -1,6 +1,5 @@
 """Unit tests for Okapi BM25 sparse index."""
 
-import pytest
 from langchain_core.documents import Document
 
 from app.rag.bm25 import BM25Index, tokenize_multilingual

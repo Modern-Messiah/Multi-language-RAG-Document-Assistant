@@ -25,6 +25,21 @@ from langchain_core.documents import Document
 
 logger = logging.getLogger(__name__)
 
+try:
+    from flashrank import RerankRequest
+except ImportError:  # pragma: no cover
+    class RerankRequest:  # type: ignore[no-redef]
+        """Fallback RerankRequest container when flashrank is not installed."""
+
+        def __init__(
+            self,
+            query: Optional[str] = None,
+            passages: Optional[List[Dict[str, Any]]] = None,
+        ):
+            self.query = query
+            self.passages = passages if passages is not None else []
+
+
 DEFAULT_FLASHRANK_MODEL = "ms-marco-TinyBERT-L-2-v2"
 DEFAULT_MULTILINGUAL_FLASHRANK_MODEL = "ms-marco-MultiBERT-L-12"
 DEFAULT_COHERE_MODEL = "rerank-v3.5"
@@ -121,8 +136,6 @@ class FlashRankReranker(BaseReranker):
             return documents[:top_n]
 
         try:
-            from flashrank import RerankRequest
-
             passages = [
                 {"id": idx, "text": doc.page_content, "meta": dict(doc.metadata)}
                 for idx, doc in enumerate(documents)

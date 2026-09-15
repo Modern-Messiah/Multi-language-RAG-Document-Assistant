@@ -92,6 +92,20 @@ def test_flashrank_reranker_handles_missing_ranker():
     assert results[0].page_content == "A"
 
 
+def test_flashrank_reranker_works_without_flashrank_module_installed():
+    docs = [Document(page_content="A", metadata={"id": 0})]
+    reranker = FlashRankReranker()
+    mock_ranker = MagicMock()
+    mock_ranker.rerank.return_value = [{"id": 0, "score": 0.99}]
+    reranker._ranker = mock_ranker
+
+    with patch.dict("sys.modules", {"flashrank": None}):
+        results = reranker.rerank("query", docs, top_n=1)
+        assert len(results) == 1
+        assert results[0].metadata["rerank_score"] == 0.99
+
+
+
 # =========================
 # CohereReranker
 # =========================
@@ -290,9 +304,9 @@ def test_rag_chain_ask_invokes_reranker_and_attaches_score():
 
 def test_normalize_reranker_model():
     from app.rag.reranker import (
+        DEFAULT_COHERE_MODEL,
         DEFAULT_FLASHRANK_MODEL,
         DEFAULT_MULTILINGUAL_FLASHRANK_MODEL,
-        DEFAULT_COHERE_MODEL,
         normalize_reranker_model,
     )
 
