@@ -144,6 +144,13 @@ class Settings(BaseSettings):
     # Enables automatic/explicit metadata extraction and ChromaDB filtering (year, company, doc_type).
     metadata_filtering_enabled: bool = True
 
+    # --- Hybrid Search (BM25 + Dense + RRF) ---
+    # Combines vector semantic search with sparse lexical BM25 matching.
+    hybrid_search_enabled: bool = True
+    hybrid_bm25_weight: float = Field(default=1.0, ge=0.0)
+    hybrid_dense_weight: float = Field(default=1.0, ge=0.0)
+    hybrid_rrf_k: int = Field(default=60, ge=1)
+
     @model_validator(mode="after")
     def _api_key_is_header_safe(self) -> "Settings":
         # HTTP header values are latin-1 on the wire while clients send UTF-8,

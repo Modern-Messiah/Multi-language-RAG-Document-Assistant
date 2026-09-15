@@ -109,6 +109,11 @@ class RAGChain:
         reranker=None,
         retrieval_candidates: Optional[int] = None,
         metadata_filtering_enabled: Optional[bool] = None,
+        bm25_index: Optional[Any] = None,
+        hybrid_search_enabled: Optional[bool] = None,
+        hybrid_dense_weight: float = 1.0,
+        hybrid_bm25_weight: float = 1.0,
+        hybrid_rrf_k: int = 60,
     ):
         """
         Args:
@@ -122,6 +127,8 @@ class RAGChain:
                 `uvicorn app.main:app` run with only a .env file fail at startup.
             reranker: optional BaseReranker instance for cross-encoder re-ranking
             retrieval_candidates: number of candidate chunks to retrieve before reranking
+            bm25_index: optional BM25Index instance for sparse keyword search
+            hybrid_search_enabled: whether to fuse dense and sparse search via RRF
         """
         self.vectorstore = vectorstore
         self.model = model or os.getenv("MODEL_NAME", "gpt-4o-mini")
@@ -154,6 +161,15 @@ class RAGChain:
             if metadata_filtering_enabled is not None
             else os.getenv("METADATA_FILTERING_ENABLED", "true").lower() in ("true", "1", "yes")
         )
+        self.bm25_index = bm25_index
+        self.hybrid_search_enabled = (
+            hybrid_search_enabled
+            if hybrid_search_enabled is not None
+            else os.getenv("HYBRID_SEARCH_ENABLED", "true").lower() in ("true", "1", "yes")
+        )
+        self.hybrid_dense_weight = hybrid_dense_weight
+        self.hybrid_bm25_weight = hybrid_bm25_weight
+        self.hybrid_rrf_k = hybrid_rrf_k
 
         if client is not None:
             self.client = client
@@ -212,19 +228,8 @@ class RAGChain:
     # =========================
     # Retrieval
     # =========================
-    def _retrieve(self, question: str, filter_dict: dict, k: Optional[int] = None) -> List[Document]:
-        """Fetch candidates, dropping any that are not actually relevant.
-
-        Plain similarity_search returns k chunks whether or not anything in the
-        corpus has to do with the question, so asking about a topic the user
-        never uploaded still filled the prompt with their nearest unrelated
-        paragraphs. Whether the model then says "I don't know" or quietly
-        answers from that noise is left entirely to the prompt.
-
-        Scores are logged on every query even when filtering is off, so the
-        threshold can be chosen from data rather than guessed.
-        """
-        effective_k = k if k is not None else self.top_k
+    def _retrieve_dense(self, question: str, filter_dict: dict, effective_k: int) -> List[Document]:
+        """Fetch dense candidates from vector store, dropping below relevance threshold."""
         if self._mmr_enabled():
             return self._retrieve_diverse(question, filter_dict, k=effective_k)
 
@@ -242,8 +247,6 @@ class RAGChain:
             similarities.append((document, similarity))
 
         if any(similarity is None for _, similarity in similarities):
-            # Unknown metric: comparing against a scale that does not apply
-            # would discard the best matches, so keep everything and say why.
             logger.warning(
                 "Unknown index space %r - relevance filtering is disabled", space
             )
@@ -277,6 +280,31 @@ class RAGChain:
                 self.relevance_threshold,
             )
         return kept
+
+    def _retrieve(self, question: str, filter_dict: dict, k: Optional[int] = None) -> List[Document]:
+        """Fetch candidates using hybrid (dense + BM25) or dense retrieval."""
+        effective_k = k if k is not None else self.top_k
+        dense_docs = self._retrieve_dense(question, filter_dict, effective_k)
+
+        if self.hybrid_search_enabled and self.bm25_index is not None:
+            from app.rag.hybrid import HybridRetriever
+
+            retriever = HybridRetriever(
+                vectorstore=self.vectorstore,
+                bm25_index=self.bm25_index,
+                embeddings_manager=self.embeddings_manager,
+                dense_weight=self.hybrid_dense_weight,
+                bm25_weight=self.hybrid_bm25_weight,
+                k_rrf=self.hybrid_rrf_k,
+            )
+            return retriever.retrieve(
+                query=question,
+                filter_dict=filter_dict,
+                k=effective_k,
+                dense_candidates=dense_docs,
+            )
+
+        return dense_docs
 
     def _mmr_enabled(self) -> bool:
         """MMR needs candidate vectors, which only the manager can hand over.
@@ -541,7 +569,7 @@ class RAGChain:
         active_reranker = reranker if reranker is not None else self.reranker
         fetch_k = (
             max(self.top_k, self.retrieval_candidates)
-            if active_reranker
+            if (active_reranker or (self.hybrid_search_enabled and self.bm25_index is not None))
             else self.top_k
         )
 
@@ -589,6 +617,8 @@ class RAGChain:
                     ],
                 }
             )
+        elif docs:
+            docs = docs[:self.top_k]
 
         if not docs:
             return None, []

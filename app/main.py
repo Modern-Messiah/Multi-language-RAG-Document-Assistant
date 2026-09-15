@@ -184,6 +184,9 @@ async def lifespan(app: FastAPI):
         else:
             server_model = normalize_model_name("deepseek", server_model)
 
+    from app.rag.bm25 import BM25Index
+    app.state.bm25_index = BM25Index()
+
     from app.rag.reranker import get_reranker
     app.state.reranker = get_reranker(settings)
     app.state.rag_chain = RAGChain(
@@ -204,6 +207,11 @@ async def lifespan(app: FastAPI):
         reranker=app.state.reranker,
         retrieval_candidates=settings.retrieval_candidates,
         metadata_filtering_enabled=settings.metadata_filtering_enabled,
+        bm25_index=app.state.bm25_index,
+        hybrid_search_enabled=settings.hybrid_search_enabled,
+        hybrid_dense_weight=settings.hybrid_dense_weight,
+        hybrid_bm25_weight=settings.hybrid_bm25_weight,
+        hybrid_rrf_k=settings.hybrid_rrf_k,
     )
     yield
     app.state.tracer.flush()
@@ -437,6 +445,8 @@ def _store_and_index(state, settings, user_id, safe_name, file_hash, contents) -
 
     try:
         state.embeddings.add_documents(chunks, ids=ids)
+        if hasattr(state, "bm25_index") and state.bm25_index is not None:
+            state.bm25_index.add_documents(chunks, owner=user_id)
     except Exception:
         logger.exception("Failed to index document")
         file_path.unlink(missing_ok=True)
@@ -475,6 +485,8 @@ def _retire_older_revisions(state, settings, source: str, keep_hash: str, user_i
     for old_hash in stale:
         try:
             state.embeddings.delete_by_file_hash(old_hash, user_id)
+            if hasattr(state, "bm25_index") and state.bm25_index is not None:
+                state.bm25_index.delete_by_file_hash(old_hash, user_id)
             storage.remove_stored_file(settings, user_id, old_hash)
             removed = True
             logger.info(
@@ -699,6 +711,8 @@ def _clear_namespace(state, settings: Settings, user_id: str) -> None:
     """
     with state.upload_locks.for_owner(user_id):
         storage.wipe_namespace(state, settings, user_id)
+        if hasattr(state, "bm25_index") and state.bm25_index is not None:
+            state.bm25_index.clear_owner(user_id)
 
 
 def _sse(event: dict) -> str:
@@ -859,6 +873,8 @@ def delete_document(
 
     try:
         removed = state.embeddings.delete_by_file_hash(file_hash, user_id)
+        if hasattr(state, "bm25_index") and state.bm25_index is not None:
+            state.bm25_index.delete_by_file_hash(file_hash, user_id)
     except Exception:
         logger.exception("Could not delete document %s", file_hash)
         raise HTTPException(status_code=503, detail="Vector store unavailable")
