@@ -44,6 +44,10 @@ KEY_HEADER = "X-Model-Key"
 MODEL_HEADER = "X-Model"
 PROVIDER_HEADER = "X-Model-Provider"
 
+RERANKER_PROVIDER_HEADER = "X-Reranker-Provider"
+RERANKER_KEY_HEADER = "X-Reranker-Key"
+RERANKER_MODEL_HEADER = "X-Reranker-Model"
+
 # Where each provider's OpenAI-compatible chat completions live. The client
 # library appends "chat/completions", so these are base URLs.
 #
@@ -95,6 +99,17 @@ def allowed_providers(settings=None) -> list:
     return [name for name in PROVIDERS if name in named]
 
 
+def normalize_model_name(provider: str, model: str) -> str:
+    """Normalize model aliases (e.g. DeepSeek-V4.1-Flash -> deepseek-flash)."""
+    if not model:
+        return model
+    if (provider or "").lower() == "deepseek":
+        cleaned = model.lower().replace("_", "-")
+        if cleaned in ("deepseek-v4.1-flash", "deepseek-v4-flash", "v4.1-flash", "deepseek-chat"):
+            return "deepseek-flash"
+    return model
+
+
 def wanted(headers, settings=None) -> tuple:
     """The (key, model, provider) a caller asked for, validated. Any may be None.
 
@@ -127,6 +142,9 @@ def wanted(headers, settings=None) -> tuple:
                 f"Unknown or disallowed provider. This deployment offers: "
                 f"{', '.join(permitted)}."
             )
+
+    if provider and model:
+        model = normalize_model_name(provider, model)
 
     return (key or None), (model or None), (provider or None)
 
@@ -206,3 +224,31 @@ def close_quietly(client) -> None:
         client.close()
     except Exception:
         logger.warning("Could not close the per-request model client")
+
+
+def wanted_reranker(headers, settings=None):
+    """Return an overridden reranker if requested via BYOK headers, else None."""
+    provider = (headers.get(RERANKER_PROVIDER_HEADER) or "").strip().lower()
+    if not provider:
+        return None
+
+    if provider not in ("none", "flashrank", "cohere"):
+        raise BringYourOwnKeyError(
+            f"Unknown reranker provider '{provider}'. Supported: none, flashrank, cohere."
+        )
+
+    key = (headers.get(RERANKER_KEY_HEADER) or "").strip()
+    if provider == "cohere" and not key and not getattr(settings, "reranker_api_key", ""):
+        raise BringYourOwnKeyError(
+            "Cohere reranker requires an API key in X-Reranker-Key header."
+        )
+
+    model = (headers.get(RERANKER_MODEL_HEADER) or "").strip()
+    from app.rag.reranker import get_reranker
+
+    return get_reranker(
+        settings,
+        provider_override=provider,
+        api_key_override=key or None,
+        model_override=model or None,
+    )

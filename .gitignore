@@ -220,6 +220,9 @@ data/backups/
 # Collected answer ratings (user questions and answers)
 data/feedback/
 
+# Downloaded benchmarks
+data/benchmarks/
+
 # ChromaDB vector database
 data/chroma_db/*
 !data/chroma_db/.gitkeep
@@ -290,3 +293,6 @@ data/**/test_pipeline/
 
 # Binary vector data
 *.bin
+
+# CocoIndex Code (ccc)
+/.cocoindex_code/

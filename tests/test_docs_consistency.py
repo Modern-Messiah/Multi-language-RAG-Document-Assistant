@@ -23,11 +23,11 @@ CLIENT_ONLY_VARS = {"TELEGRAM_BOT_TOKEN", "BACKEND_URL"}
 
 def _table_rows():
     """{VAR: default cell} from the Configuration table."""
-    return dict(re.findall(r"^\| `([A-Z_]+)` \|[^|]*\| (.+?) \|$", DOCUMENTATION, re.M))
+    return dict(re.findall(r"^\| `([A-Z0-9_]+)` \|[^|]*\| (.+?) \|$", DOCUMENTATION, re.M))
 
 
 def _env_template_vars():
-    return set(re.findall(r"^([A-Z_]+)=", ENV_TEMPLATE, re.M))
+    return set(re.findall(r"^([A-Z0-9_]+)=", ENV_TEMPLATE, re.M))
 
 
 def _normalise(value: str) -> str:
@@ -36,8 +36,17 @@ def _normalise(value: str) -> str:
 
 
 def _settings_defaults():
-    settings = Settings(_env_file=None, openai_api_key="placeholder")
-    return {name.upper(): getattr(settings, name) for name in Settings.model_fields}
+    import os
+    saved = {}
+    for name in Settings.model_fields:
+        key = name.upper()
+        if key in os.environ:
+            saved[key] = os.environ.pop(key)
+    try:
+        settings = Settings(_env_file=None, openai_api_key="placeholder")
+        return {name.upper(): getattr(settings, name) for name in Settings.model_fields}
+    finally:
+        os.environ.update(saved)
 
 
 # =========================

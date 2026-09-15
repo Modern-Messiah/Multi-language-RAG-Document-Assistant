@@ -1,4 +1,4 @@
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -25,12 +25,15 @@ class QueryRequest(BaseModel):
     # against a client that would otherwise grow the prompt without limit;
     # MAX_HISTORY_TURNS decides how many of these are actually used.
     history: List[ChatTurn] = Field(default_factory=list, max_length=20)
+    metadata_filter: Optional[Dict[str, Any]] = None
 
 
 class Source(BaseModel):
     id: int
     source: str
     preview: str
+    rerank_score: Optional[float] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 
 class QueryResponse(BaseModel):

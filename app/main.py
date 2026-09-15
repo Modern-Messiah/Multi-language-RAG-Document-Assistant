@@ -53,6 +53,7 @@ from app.rag.chain import RAGChain
 from app.rag.document_loader import SUPPORTED_EXTENSIONS, DocumentLoader
 from app.rag.embeddings import EmbeddingsManager
 from app.rag.text_splitter import TextChunker
+from app.tracing import NoOpTracer, get_tracer
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +159,7 @@ async def lifespan(app: FastAPI):
     app.state.chunker = TextChunker(
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
+        table_aware=settings.table_aware_chunking,
     )
     app.state.embeddings = EmbeddingsManager(
         persist_directory=str(settings.chroma_persist_dir),
@@ -167,15 +169,32 @@ async def lifespan(app: FastAPI):
         max_retries=settings.openai_max_retries,
         base_url=settings.openai_base_url,
     )
+
+    app.state.tracer = get_tracer(settings)
     app.state.vectorstore = app.state.embeddings.get_vectorstore(
         settings.collection_name
     )
+    llm_key = settings.llm_api_key or settings.openai_api_key
+    llm_url = settings.llm_base_url or settings.openai_base_url
+    server_model = settings.model_name
+    if "deepseek" in (llm_url or "").lower():
+        from app.byok import normalize_model_name
+        if server_model == "gpt-4o-mini":
+            server_model = "deepseek-flash"
+        else:
+            server_model = normalize_model_name("deepseek", server_model)
+
+    from app.rag.bm25 import BM25Index
+    app.state.bm25_index = BM25Index()
+
+    from app.rag.reranker import get_reranker
+    app.state.reranker = get_reranker(settings)
     app.state.rag_chain = RAGChain(
         app.state.vectorstore,
-        model=settings.model_name,
+        model=server_model,
         top_k=settings.top_k_results,
         temperature=settings.temperature,
-        api_key=settings.openai_api_key,
+        api_key=llm_key,
         max_answer_tokens=settings.max_answer_tokens,
         relevance_threshold=settings.relevance_threshold,
         max_history_turns=settings.max_history_turns,
@@ -183,9 +202,20 @@ async def lifespan(app: FastAPI):
         embeddings_manager=app.state.embeddings,
         timeout=settings.openai_timeout,
         max_retries=settings.openai_max_retries,
-        base_url=settings.openai_base_url,
+        base_url=llm_url,
+        tracer=app.state.tracer,
+        reranker=app.state.reranker,
+        retrieval_candidates=settings.retrieval_candidates,
+        metadata_filtering_enabled=settings.metadata_filtering_enabled,
+        bm25_index=app.state.bm25_index,
+        hybrid_search_enabled=settings.hybrid_search_enabled,
+        hybrid_dense_weight=settings.hybrid_dense_weight,
+        hybrid_bm25_weight=settings.hybrid_bm25_weight,
+        hybrid_rrf_k=settings.hybrid_rrf_k,
     )
     yield
+    app.state.tracer.flush()
+    app.state.tracer.shutdown()
 
 
 def create_app(settings: Optional[Settings] = None) -> FastAPI:
@@ -196,6 +226,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         lifespan=lifespan,
     )
     application.state.settings = settings or get_settings()
+    application.state.tracer = NoOpTracer()
     application.include_router(router)
     application.add_middleware(RequestContextMiddleware)
 
@@ -398,11 +429,14 @@ def _store_and_index(state, settings, user_id, safe_name, file_hash, contents) -
             detail="Document contains no extractable text"
         )
 
-    # 🏷 Metadata: human-readable source, content hash, owner
+    # 🏷 Metadata: human-readable source, content hash, owner, and extracted tags
+    from app.rag.metadata_extractor import extract_document_metadata
+    doc_metadata = extract_document_metadata(safe_name, chunks[0].page_content if chunks else None)
     for chunk in chunks:
         chunk.metadata["source"] = safe_name
         chunk.metadata["file_hash"] = file_hash
         chunk.metadata["user_id"] = user_id
+        chunk.metadata.update(doc_metadata)
 
     # 📦 Deterministic per-owner IDs. Chroma UPSERTS on an existing ID
     # (it does not skip), but user_id is validated and used raw, so IDs
@@ -411,6 +445,8 @@ def _store_and_index(state, settings, user_id, safe_name, file_hash, contents) -
 
     try:
         state.embeddings.add_documents(chunks, ids=ids)
+        if hasattr(state, "bm25_index") and state.bm25_index is not None:
+            state.bm25_index.add_documents(chunks, owner=user_id)
     except Exception:
         logger.exception("Failed to index document")
         file_path.unlink(missing_ok=True)
@@ -449,6 +485,8 @@ def _retire_older_revisions(state, settings, source: str, keep_hash: str, user_i
     for old_hash in stale:
         try:
             state.embeddings.delete_by_file_hash(old_hash, user_id)
+            if hasattr(state, "bm25_index") and state.bm25_index is not None:
+                state.bm25_index.delete_by_file_hash(old_hash, user_id)
             storage.remove_stored_file(settings, user_id, old_hash)
             removed = True
             logger.info(
@@ -470,6 +508,14 @@ def _caller_model(request: Request) -> tuple:
     """
     try:
         return byok.wanted(request.headers, request.app.state.settings)
+    except byok.BringYourOwnKeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+def _caller_reranker(request: Request):
+    """The reranker this caller asked for via BYOK headers, if any."""
+    try:
+        return byok.wanted_reranker(request.headers, request.app.state.settings)
     except byok.BringYourOwnKeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -576,7 +622,21 @@ def _quota_usage(state, settings: Settings, user_id: str) -> QuotaUsage:
 def query_rag(request: Request, payload: QueryRequest):
     settings: Settings = request.app.state.settings
     key, model, provider = _caller_model(request)
+    caller_reranker = _caller_reranker(request)
     client = byok.client_for(key, settings, provider) if key else None
+
+    tracer = getattr(request.app.state, "tracer", None)
+    trace = (
+        tracer.start_trace(
+            request_id=request_id_of(request),
+            user_id=payload.user_id,
+            question=payload.question,
+            language=payload.language,
+            tags=[provider or "default"],
+        )
+        if tracer
+        else None
+    )
 
     try:
         answer = request.app.state.rag_chain.ask(
@@ -586,6 +646,9 @@ def query_rag(request: Request, payload: QueryRequest):
             history=payload.history,
             client=client,
             model=model,
+            trace=trace,
+            reranker=caller_reranker,
+            metadata_filter=payload.metadata_filter,
         )
     except RateLimitError as exc:
         if client:
@@ -648,6 +711,8 @@ def _clear_namespace(state, settings: Settings, user_id: str) -> None:
     """
     with state.upload_locks.for_owner(user_id):
         storage.wipe_namespace(state, settings, user_id)
+        if hasattr(state, "bm25_index") and state.bm25_index is not None:
+            state.bm25_index.clear_owner(user_id)
 
 
 def _sse(event: dict) -> str:
@@ -670,7 +735,21 @@ def query_rag_stream(request: Request, payload: QueryRequest):
     """
     settings: Settings = request.app.state.settings
     key, model, provider = _caller_model(request)
+    caller_reranker = _caller_reranker(request)
     client = byok.client_for(key, settings, provider) if key else None
+
+    tracer = getattr(request.app.state, "tracer", None)
+    trace = (
+        tracer.start_trace(
+            request_id=request_id_of(request),
+            user_id=payload.user_id,
+            question=payload.question,
+            language=payload.language,
+            tags=[provider or "default"],
+        )
+        if tracer
+        else None
+    )
 
     stream = request.app.state.rag_chain.ask_stream(
         question=payload.question,
@@ -679,6 +758,9 @@ def query_rag_stream(request: Request, payload: QueryRequest):
         history=payload.history,
         client=client,
         model=model,
+        trace=trace,
+        reranker=caller_reranker,
+        metadata_filter=payload.metadata_filter,
     )
 
     try:
@@ -791,6 +873,8 @@ def delete_document(
 
     try:
         removed = state.embeddings.delete_by_file_hash(file_hash, user_id)
+        if hasattr(state, "bm25_index") and state.bm25_index is not None:
+            state.bm25_index.delete_by_file_hash(file_hash, user_id)
     except Exception:
         logger.exception("Could not delete document %s", file_hash)
         raise HTTPException(status_code=503, detail="Vector store unavailable")
@@ -851,6 +935,15 @@ def submit_feedback(request: Request, payload: FeedbackRequest):
     except OSError:
         logger.exception("Could not write feedback")
         raise HTTPException(status_code=503, detail="Feedback storage unavailable")
+
+    tracer = getattr(request.app.state, "tracer", None)
+    if tracer is not None:
+        tracer.record_feedback(
+            request_id=payload.request_id,
+            rating=payload.rating,
+            comment=payload.comment,
+            user_id=payload.user_id,
+        )
 
     request.app.state.activity.touch(payload.user_id)
     return FeedbackResponse(message="Thanks - recorded.")

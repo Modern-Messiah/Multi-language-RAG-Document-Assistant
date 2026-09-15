@@ -23,6 +23,9 @@ from clients.backend import (  # noqa: E402
     PROVIDER_HEADER,
     PROVIDERS,
     REQUEST_ID_HEADER,
+    RERANKER_KEY_HEADER,
+    RERANKER_MODEL_HEADER,
+    RERANKER_PROVIDER_HEADER,
     SUPPORTED_LANGUAGES,
     api_headers,
     backend_url,
@@ -69,9 +72,10 @@ DEFAULT_PROVIDER = "openai"
 
 
 def asking_headers() -> dict:
-    """The shared secret, plus this session's own key and model if it gave any.
+    """The caller's own key and model, if configured.
 
-    Only questions carry them: uploads are embedded on the operator's key,
+    Sent on /query and /query/stream so the model call goes against their
+    quota. Uploads still use HEADERS (the shared secret, if one is configured)
     because the collection is bound to one embedding model.
     """
     headers = dict(HEADERS)
@@ -84,6 +88,17 @@ def asking_headers() -> dict:
         provider = st.session_state.get("own_provider", "")
         if provider and provider != DEFAULT_PROVIDER:
             headers[PROVIDER_HEADER] = provider
+
+    reranker = st.session_state.get("own_reranker", "none")
+    if reranker and reranker != "none":
+        headers[RERANKER_PROVIDER_HEADER] = reranker
+        r_key = st.session_state.get("own_reranker_key", "").strip()
+        if r_key:
+            headers[RERANKER_KEY_HEADER] = r_key
+        r_model = st.session_state.get("own_reranker_model", "").strip()
+        if r_model:
+            headers[RERANKER_MODEL_HEADER] = r_model
+
     return headers
 
 
@@ -295,12 +310,41 @@ with st.sidebar:
                  "protocol.",
             disabled=not st.session_state["own_key"],
         )
+        provider_placeholders = {
+            "openai": "gpt-4o",
+            "anthropic": "claude-3-5-sonnet-20241022",
+            "gemini": "gemini-1.5-flash",
+            "deepseek": "deepseek-flash",
+            "kimi": "moonshot-v1-8k",
+            "kimi-cn": "moonshot-v1-8k",
+        }
+        chosen_provider = st.session_state.get("own_provider", "openai")
+        model_placeholder = provider_placeholders.get(chosen_provider, "gpt-4o")
+
         st.text_input(
-            "Model", key="own_model", placeholder="gpt-4o",
-            help="Any model your key can reach at that provider. Empty means "
-                 "the assistant's own.",
+            "Model", key="own_model", placeholder=model_placeholder,
+            help="Any model your key can reach at that provider (e.g. deepseek-flash). "
+                 "Empty means the assistant's own.",
             disabled=not st.session_state["own_key"],
         )
+
+    with st.expander("🎯 Cross-Encoder Reranker", expanded=False):
+        st.caption("Re-ranks top candidate chunks using query-document cross-attention.")
+        st.selectbox(
+            "Provider",
+            ["none", "flashrank", "cohere"],
+            key="own_reranker",
+            help="flashrank runs locally via fast ONNX; cohere uses Cohere Rerank API.",
+        )
+        if st.session_state.get("own_reranker") == "cohere":
+            st.text_input("Cohere API Key", type="password", key="own_reranker_key")
+            st.text_input("Model", key="own_reranker_model", placeholder="rerank-v3.5")
+
+    with st.expander("🏷️ Metadata Filter", expanded=False):
+        st.caption("Restrict retrieval to specific company, year, or document type.")
+        st.text_input("Company / Ticker", key="filter_company", placeholder="e.g. WALMART, VERIZON")
+        st.text_input("Year", key="filter_year", placeholder="e.g. 2020, 2022")
+        st.selectbox("Document Type", ["All", "10-K", "10-Q", "8-K", "EARNINGS"], key="filter_doc_type")
 
     st.divider()
 
@@ -534,7 +578,14 @@ def render_feedback(index, turn):
 def render_sources(sources):
     with st.expander(f"📚 {len(sources)} source(s)"):
         for src in sources:
-            st.markdown(f"**{src['source']}**")
+            score_str = ""
+            if "rerank_score" in src and src["rerank_score"] is not None:
+                score_str = f" *(relevance: {src['rerank_score']:.3f})*"
+            meta_str = ""
+            if "metadata" in src and src["metadata"]:
+                tags = [f"`{k}: {v}`" for k, v in src["metadata"].items()]
+                meta_str = f" [{' '.join(tags)}]"
+            st.markdown(f"**{src['source']}**{score_str}{meta_str}")
             st.caption(src["preview"])
 
 
@@ -568,6 +619,17 @@ if question and question.strip():
     with st.chat_message("user"):
         st.markdown(question)
 
+    metadata_filter = {}
+    f_comp = st.session_state.get("filter_company", "").strip()
+    if f_comp:
+        metadata_filter["company"] = f_comp.upper()
+    f_yr = st.session_state.get("filter_year", "").strip()
+    if f_yr and f_yr.isdigit():
+        metadata_filter["year"] = int(f_yr)
+    f_type = st.session_state.get("filter_doc_type", "All")
+    if f_type and f_type != "All":
+        metadata_filter["doc_type"] = f_type
+
     payload = {
         "question": question,
         "language": language,
@@ -579,6 +641,8 @@ if question and question.strip():
             for t in transcript[-HISTORY_TURNS_SENT:]
         ],
     }
+    if metadata_filter:
+        payload["metadata_filter"] = metadata_filter
 
     with st.chat_message("assistant"):
         # The response is opened before streaming so an ordinary failure is

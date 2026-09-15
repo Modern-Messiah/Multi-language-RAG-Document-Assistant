@@ -5,7 +5,7 @@ RAG Chain: Retrieval-Augmented Generation
 import logging
 import os
 import re
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 from langchain.schema import Document
@@ -13,6 +13,7 @@ from openai import OpenAI
 
 from app.rag.embeddings import DEFAULT_SPACE, distance_to_similarity, select_mmr
 from app.rag.languages import AUTO_LANGUAGE, LANG_RULES, rule_for
+from app.tracing import NoOpTraceHandle, NoOpTracer
 
 # LANG_RULES is re-exported: it lived here first, and the clients now read the
 # same table from app.rag.languages instead of keeping their own copies.
@@ -104,6 +105,15 @@ class RAGChain:
         timeout: Optional[float] = None,
         max_retries: Optional[int] = None,
         base_url: str = "",
+        tracer=None,
+        reranker=None,
+        retrieval_candidates: Optional[int] = None,
+        metadata_filtering_enabled: Optional[bool] = None,
+        bm25_index: Optional[Any] = None,
+        hybrid_search_enabled: Optional[bool] = None,
+        hybrid_dense_weight: float = 1.0,
+        hybrid_bm25_weight: float = 1.0,
+        hybrid_rrf_k: int = 60,
     ):
         """
         Args:
@@ -115,6 +125,10 @@ class RAGChain:
                 pydantic-settings reads .env WITHOUT exporting it into
                 os.environ, so relying on the env var alone made a plain
                 `uvicorn app.main:app` run with only a .env file fail at startup.
+            reranker: optional BaseReranker instance for cross-encoder re-ranking
+            retrieval_candidates: number of candidate chunks to retrieve before reranking
+            bm25_index: optional BM25Index instance for sparse keyword search
+            hybrid_search_enabled: whether to fuse dense and sparse search via RRF
         """
         self.vectorstore = vectorstore
         self.model = model or os.getenv("MODEL_NAME", "gpt-4o-mini")
@@ -135,6 +149,27 @@ class RAGChain:
         # MMR needs candidate vectors, and only the manager can produce them.
         self.embeddings_manager = embeddings_manager
         self._warned_about_mmr = False
+        self.tracer = tracer or NoOpTracer()
+        self.reranker = reranker
+        self.retrieval_candidates = int(
+            retrieval_candidates
+            if retrieval_candidates is not None
+            else os.getenv("RETRIEVAL_CANDIDATES", 20)
+        )
+        self.metadata_filtering_enabled = (
+            metadata_filtering_enabled
+            if metadata_filtering_enabled is not None
+            else os.getenv("METADATA_FILTERING_ENABLED", "true").lower() in ("true", "1", "yes")
+        )
+        self.bm25_index = bm25_index
+        self.hybrid_search_enabled = (
+            hybrid_search_enabled
+            if hybrid_search_enabled is not None
+            else os.getenv("HYBRID_SEARCH_ENABLED", "true").lower() in ("true", "1", "yes")
+        )
+        self.hybrid_dense_weight = hybrid_dense_weight
+        self.hybrid_bm25_weight = hybrid_bm25_weight
+        self.hybrid_rrf_k = hybrid_rrf_k
 
         if client is not None:
             self.client = client
@@ -193,26 +228,16 @@ class RAGChain:
     # =========================
     # Retrieval
     # =========================
-    def _retrieve(self, question: str, filter_dict: dict) -> List[Document]:
-        """Fetch candidates, dropping any that are not actually relevant.
-
-        Plain similarity_search returns k chunks whether or not anything in the
-        corpus has to do with the question, so asking about a topic the user
-        never uploaded still filled the prompt with their nearest unrelated
-        paragraphs. Whether the model then says "I don't know" or quietly
-        answers from that noise is left entirely to the prompt.
-
-        Scores are logged on every query even when filtering is off, so the
-        threshold can be chosen from data rather than guessed.
-        """
+    def _retrieve_dense(self, question: str, filter_dict: dict, effective_k: int) -> List[Document]:
+        """Fetch dense candidates from vector store, dropping below relevance threshold."""
         if self._mmr_enabled():
-            return self._retrieve_diverse(question, filter_dict)
+            return self._retrieve_diverse(question, filter_dict, k=effective_k)
 
-        scored = self._search_with_scores(question, filter_dict)
+        scored = self._search_with_scores(question, filter_dict, k=effective_k)
         if scored is None:
             # A vector store without the scored API (or an injected double).
             return self.vectorstore.similarity_search(
-                question, k=self.top_k, filter=filter_dict
+                question, k=effective_k, filter=filter_dict
             )
 
         space = self._index_space()
@@ -222,8 +247,6 @@ class RAGChain:
             similarities.append((document, similarity))
 
         if any(similarity is None for _, similarity in similarities):
-            # Unknown metric: comparing against a scale that does not apply
-            # would discard the best matches, so keep everything and say why.
             logger.warning(
                 "Unknown index space %r - relevance filtering is disabled", space
             )
@@ -258,6 +281,31 @@ class RAGChain:
             )
         return kept
 
+    def _retrieve(self, question: str, filter_dict: dict, k: Optional[int] = None) -> List[Document]:
+        """Fetch candidates using hybrid (dense + BM25) or dense retrieval."""
+        effective_k = k if k is not None else self.top_k
+        dense_docs = self._retrieve_dense(question, filter_dict, effective_k)
+
+        if self.hybrid_search_enabled and self.bm25_index is not None:
+            from app.rag.hybrid import HybridRetriever
+
+            retriever = HybridRetriever(
+                vectorstore=self.vectorstore,
+                bm25_index=self.bm25_index,
+                embeddings_manager=self.embeddings_manager,
+                dense_weight=self.hybrid_dense_weight,
+                bm25_weight=self.hybrid_bm25_weight,
+                k_rrf=self.hybrid_rrf_k,
+            )
+            return retriever.retrieve(
+                query=question,
+                filter_dict=filter_dict,
+                k=effective_k,
+                dense_candidates=dense_docs,
+            )
+
+        return dense_docs
+
     def _mmr_enabled(self) -> bool:
         """MMR needs candidate vectors, which only the manager can hand over.
 
@@ -279,14 +327,15 @@ class RAGChain:
             return False
         return True
 
-    def _retrieve_diverse(self, question: str, filter_dict: dict) -> List[Document]:
+    def _retrieve_diverse(self, question: str, filter_dict: dict, k: Optional[int] = None) -> List[Document]:
         """Threshold first, then pick a diverse subset of what survived.
 
         The order matters: MMR would otherwise spend one of its k slots on a
         chunk that is merely different, rather than different *and* relevant.
         """
+        effective_k = k if k is not None else self.top_k
         owner = filter_dict["user_id"]
-        fetch_k = max(self.top_k, self.top_k * MMR_FETCH_MULTIPLIER)
+        fetch_k = max(effective_k, effective_k * MMR_FETCH_MULTIPLIER)
         candidates = self.embeddings_manager.search_candidates(question, fetch_k, owner)
         if not candidates:
             return []
@@ -324,15 +373,16 @@ class RAGChain:
                 )
             scored = kept
 
-        return select_mmr(scored, self.top_k, self.mmr_lambda)
+        return select_mmr(scored, effective_k, self.mmr_lambda)
 
-    def _search_with_scores(self, question: str, filter_dict: dict):
+    def _search_with_scores(self, question: str, filter_dict: dict, k: Optional[int] = None):
         """Scored search, or None when the store cannot do it."""
         search = getattr(self.vectorstore, "similarity_search_with_score", None)
         if search is None:
             return None
+        effective_k = k if k is not None else self.top_k
         try:
-            return search(question, k=self.top_k, filter=filter_dict)
+            return search(question, k=effective_k, filter=filter_dict)
         except TypeError:
             # A double whose signature predates the filter argument.
             return None
@@ -447,15 +497,36 @@ class RAGChain:
             if src in seen:
                 continue
             seen.add(src)
-            sources.append({
+            entry = {
                 "id": len(sources) + 1,
                 "source": src,
                 "preview": doc.page_content[:200],
-            })
+            }
+            if "rerank_score" in doc.metadata:
+                entry["rerank_score"] = doc.metadata["rerank_score"]
+            meta = {
+                k: doc.metadata[k]
+                for k in ("company", "year", "quarter", "doc_type")
+                if k in doc.metadata
+            }
+            if meta:
+                entry["metadata"] = meta
+            sources.append(entry)
 
         return sources
 
-    def _prepare(self, question, language, user_id, history, client=None, model=None):
+    def _prepare(
+        self,
+        question,
+        language,
+        user_id,
+        history,
+        client=None,
+        model=None,
+        trace=None,
+        reranker=None,
+        metadata_filter: Optional[Dict[str, Any]] = None,
+    ):
         """Retrieve and build the chat request.
 
         Shared by ask() and ask_stream() so the two cannot drift: a prompt
@@ -470,14 +541,84 @@ class RAGChain:
         if not user_id:
             raise ValueError("user_id is required for retrieval")
 
-        filter_dict = {"user_id": user_id}
+        # Resolve metadata filter
+        resolved_filter = {}
+        if self.metadata_filtering_enabled:
+            from app.rag.metadata_extractor import extract_query_metadata
+            resolved_filter = extract_query_metadata(question)
+        if metadata_filter:
+            resolved_filter.update(metadata_filter)
+
+        from app.rag.metadata_extractor import build_chroma_filter
+        filter_dict = build_chroma_filter(user_id, resolved_filter)
+        trace_handle = trace or NoOpTraceHandle()
 
         # Retrieve on the standalone form, answer the question as asked. The
         # condensing call goes on the caller's key too: it is their question
         # being rewritten, and billing half an exchange to each side would be
         # the strangest possible split.
         search_query = self._condense(question, history, client, model)
-        docs = self._retrieve(search_query, filter_dict)
+        if search_query != question:
+            condense_span = trace_handle.span("query_condense", input={"question": question})
+            condense_span.end(output={"rewritten": search_query})
+            if not resolved_filter and self.metadata_filtering_enabled:
+                from app.rag.metadata_extractor import extract_query_metadata
+                resolved_filter = extract_query_metadata(search_query)
+                filter_dict = build_chroma_filter(user_id, resolved_filter)
+
+        active_reranker = reranker if reranker is not None else self.reranker
+        fetch_k = (
+            max(self.top_k, self.retrieval_candidates)
+            if (active_reranker or (self.hybrid_search_enabled and self.bm25_index is not None))
+            else self.top_k
+        )
+
+        retrieval_span = trace_handle.span(
+            "retrieval",
+            input={"query": search_query, "k": fetch_k, "filter": filter_dict},
+        )
+        docs = self._retrieve(search_query, filter_dict, k=fetch_k)
+
+        # Fallback to tenant-wide search if metadata filter yielded 0 candidates
+        if not docs and resolved_filter:
+            logger.info(
+                "Metadata filter %s yielded 0 results; falling back to tenant-wide search",
+                resolved_filter,
+            )
+            fallback_filter = {"user_id": user_id}
+            docs = self._retrieve(search_query, fallback_filter, k=fetch_k)
+
+        retrieval_span.end(
+            output={
+                "count": len(docs),
+                "sources": [d.metadata.get("source", "unknown") for d in docs],
+                "filter_used": filter_dict,
+            }
+        )
+
+        if docs and active_reranker:
+            rerank_span = trace_handle.span(
+                "rerank",
+                input={
+                    "query": search_query,
+                    "candidates_count": len(docs),
+                    "top_n": self.top_k,
+                },
+            )
+            docs = active_reranker.rerank(search_query, docs, top_n=self.top_k)
+            rerank_span.end(
+                output={
+                    "count": len(docs),
+                    "sources": [d.metadata.get("source", "unknown") for d in docs],
+                    "scores": [
+                        d.metadata.get("rerank_score")
+                        for d in docs
+                        if "rerank_score" in d.metadata
+                    ],
+                }
+            )
+        elif docs:
+            docs = docs[:self.top_k]
 
         if not docs:
             return None, []
@@ -529,6 +670,9 @@ Answer:
         history=None,
         client=None,
         model=None,
+        trace=None,
+        reranker=None,
+        metadata_filter: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         """Answer one question.
 
@@ -536,23 +680,63 @@ Answer:
         model they chose; the chain's own are used when they are not given. The
         chain never keeps them - see app/byok.py for why.
         """
+        trace_handle = trace or NoOpTraceHandle()
         request, sources = self._prepare(
-            question, language, user_id, history, client, model
+            question,
+            language,
+            user_id,
+            history,
+            client,
+            model,
+            trace=trace_handle,
+            reranker=reranker,
+            metadata_filter=metadata_filter,
         )
 
         if request is None:
+            trace_handle.end(output={"answer": NO_CONTEXT_ANSWER, "sources": []})
             return {"answer": NO_CONTEXT_ANSWER, "sources": [], "model": None}
 
-        response = (client or self.client).chat.completions.create(**request)
-        self._log_usage(response, user_id, model)
+        gen_handle = trace_handle.generation(
+            name="generation",
+            model=request.get("model"),
+            input=request.get("messages"),
+            model_parameters={
+                "temperature": self.temperature,
+                "max_tokens": self.max_answer_tokens,
+            },
+        )
 
-        raw_answer = (response.choices[0].message.content or "").strip()
+        try:
+            response = (client or self.client).chat.completions.create(**request)
+            self._log_usage(response, user_id, model)
 
-        return {
-            "answer": self._strip_citations(raw_answer),
-            "sources": sources,
-            "model": request["model"],
-        }
+            raw_answer = (response.choices[0].message.content or "").strip()
+            clean_answer = self._strip_citations(raw_answer)
+
+            usage = getattr(response, "usage", None)
+            usage_dict = (
+                {
+                    "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+                    "completion_tokens": getattr(usage, "completion_tokens", 0),
+                    "total_tokens": getattr(usage, "total_tokens", 0),
+                }
+                if usage
+                else None
+            )
+
+            gen_handle.end(output=clean_answer, usage=usage_dict)
+            trace_handle.end(output={"answer": clean_answer, "sources": sources})
+
+            return {
+                "answer": clean_answer,
+                "sources": sources,
+                "model": request["model"],
+            }
+        except Exception as exc:
+            gen_handle.end(level="ERROR", status_message=str(exc))
+            trace_handle.end(metadata={"error": str(exc)})
+            raise
 
     # =========================
     # Streaming
@@ -565,6 +749,9 @@ Answer:
         history=None,
         client=None,
         model=None,
+        trace=None,
+        reranker=None,
+        metadata_filter: Optional[Dict[str, Any]] = None,
     ):
         """Yield the answer as it is generated.
 
@@ -579,49 +766,75 @@ Answer:
             {"type": "token", "text": "..."}
             {"type": "done"}
         """
+        trace_handle = trace or NoOpTraceHandle()
         request, sources = self._prepare(
-            question, language, user_id, history, client, model
+            question,
+            language,
+            user_id,
+            history,
+            client,
+            model,
+            trace=trace_handle,
+            reranker=reranker,
+            metadata_filter=metadata_filter,
         )
 
         if request is None:
+            trace_handle.end(output={"answer": NO_CONTEXT_ANSWER, "sources": []})
             yield {"type": "sources", "sources": sources}
             yield {"type": "token", "text": NO_CONTEXT_ANSWER}
             yield {"type": "done"}
             return
 
-        # The completion is opened BEFORE the first event. create() returns
-        # once the response headers arrive, so an upstream refusal - a rejected
-        # key above all, which is the commonest mistake when a caller brings
-        # their own - raises while the handler is still priming this generator
-        # and can answer with a real status code. Yielding sources first
-        # committed a 200 to the wire and left the refusal to be dug out of the
-        # stream as a mid-answer error event. Token order is unchanged: nothing
-        # can be generated before the request is sent either way.
-        stream = (client or self.client).chat.completions.create(**request, stream=True)
+        gen_handle = trace_handle.generation(
+            name="generation",
+            model=request.get("model"),
+            input=request.get("messages"),
+            model_parameters={
+                "temperature": self.temperature,
+                "max_tokens": self.max_answer_tokens,
+            },
+        )
+
+        try:
+            stream = (client or self.client).chat.completions.create(**request, stream=True)
+        except Exception as exc:
+            gen_handle.end(level="ERROR", status_message=str(exc))
+            trace_handle.end(metadata={"error": str(exc)})
+            raise
 
         yield {"type": "sources", "sources": sources}
 
         stripper = CitationStripper()
-
+        collected = []
         finish_reason = None
-        for chunk in stream:
-            choices = getattr(chunk, "choices", None) or []
-            if not choices:
-                continue
-            finish_reason = getattr(choices[0], "finish_reason", None) or finish_reason
-            delta = getattr(getattr(choices[0], "delta", None), "content", None)
-            if not delta:
-                continue
-            text = stripper.feed(delta)
-            if text:
-                yield {"type": "token", "text": text}
+        try:
+            for chunk in stream:
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    continue
+                finish_reason = getattr(choices[0], "finish_reason", None) or finish_reason
+                delta = getattr(getattr(choices[0], "delta", None), "content", None)
+                if not delta:
+                    continue
+                text = stripper.feed(delta)
+                if text:
+                    collected.append(text)
+                    yield {"type": "token", "text": text}
 
-        tail = stripper.flush()
-        if tail:
-            yield {"type": "token", "text": tail}
+            tail = stripper.flush()
+            if tail:
+                collected.append(tail)
+                yield {"type": "token", "text": tail}
 
-        # A streamed response carries no usage block, so the per-tenant cost
-        # line that ask() logs is not available here; finish_reason is.
+            full_text = "".join(collected)
+            gen_handle.end(output=full_text, metadata={"finish_reason": finish_reason})
+            trace_handle.end(output={"answer": full_text, "sources": sources})
+        except Exception as exc:
+            gen_handle.end(level="ERROR", status_message=str(exc))
+            trace_handle.end(metadata={"error": str(exc)})
+            raise
+
         logger.info(
             "streamed completion user_id=%s model=%s finish_reason=%s",
             user_id,
@@ -636,3 +849,4 @@ Answer:
             )
 
         yield {"type": "done"}
+

@@ -681,6 +681,17 @@ def test_a_providers_url_beats_the_deployments(tmp_path):
         client.close()
 
 
+def test_deepseek_v4_flash_model_is_accepted():
+    key, model, provider = byok.wanted({
+        KEY_HEADER: GOOD_KEY,
+        MODEL_HEADER: "DeepSeek-V4.1-Flash",
+        byok.PROVIDER_HEADER: "deepseek",
+    })
+    assert model == "deepseek-flash"
+    assert provider == "deepseek"
+    assert key == GOOD_KEY
+
+
 def test_the_caller_still_cannot_name_a_url():
     """The whole reason a provider is a name and not an address: a URL from the
     request would make this backend fetch whatever it is handed."""

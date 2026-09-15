@@ -32,7 +32,8 @@ class TextChunker:
         self,
         chunk_size: int = 1000,
         chunk_overlap: int = 200,
-        length_function: callable = len
+        length_function: callable = len,
+        table_aware: bool = True,
     ):
         """
         Initialize text chunker
@@ -41,9 +42,11 @@ class TextChunker:
             chunk_size: Maximum characters per chunk (default: 1000)
             chunk_overlap: Characters to overlap between chunks (default: 200)
             length_function: Function to measure chunk length (default: len)
+            table_aware: Whether to preserve markdown/HTML tables intact (default: True)
         """
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.table_aware = table_aware
         
         # Create splitter with intelligent separators
         self.splitter = RecursiveCharacterTextSplitter(
@@ -59,10 +62,20 @@ class TextChunker:
             ],
             keep_separator=True
         )
+
+        if self.table_aware:
+            from app.rag.table_splitter import TableAwareSplitter
+            self.table_splitter = TableAwareSplitter(
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                fallback_splitter=self.splitter.split_text,
+            )
+        else:
+            self.table_splitter = None
         
         logger.info(
             f"✅ Initialized TextChunker: "
-            f"chunk_size={chunk_size}, overlap={chunk_overlap}"
+            f"chunk_size={chunk_size}, overlap={chunk_overlap}, table_aware={table_aware}"
         )
     
     def split_documents(self, documents: List[Document]) -> List[Document]:
@@ -80,8 +93,13 @@ class TextChunker:
             return []
         
         logger.info(f"🔄 Splitting {len(documents)} document(s)...")
+
+        if self.table_aware and self.table_splitter is not None:
+            chunks = self.table_splitter.split_documents(documents)
+            logger.info(f"✅ Created {len(chunks)} chunks from {len(documents)} document(s) (table-aware)")
+            return chunks
         
-        # Split documents
+        # Standard splitting
         chunks = self.splitter.split_documents(documents)
         
         # Enrich metadata with chunk information
@@ -89,7 +107,9 @@ class TextChunker:
             chunk.metadata.update({
                 "chunk_id": i,
                 "chunk_size": len(chunk.page_content),
-                "total_chunks": len(chunks)
+                "total_chunks": len(chunks),
+                "contains_table": False,
+                "is_table": False,
             })
         
         logger.info(f"✅ Created {len(chunks)} chunks from {len(documents)} document(s)")
@@ -109,8 +129,12 @@ class TextChunker:
         if not text or not text.strip():
             logger.warning("⚠️ Empty text provided for splitting")
             return []
-        
-        chunks = self.splitter.split_text(text)
+
+        if self.table_aware and self.table_splitter is not None:
+            chunks_with_meta = self.table_splitter.split_text(text)
+            chunks = [c[0] for c in chunks_with_meta]
+        else:
+            chunks = self.splitter.split_text(text)
         
         logger.info(f"✅ Created {len(chunks)} chunks from text")
         
