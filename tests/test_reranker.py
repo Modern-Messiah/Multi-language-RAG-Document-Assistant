@@ -290,9 +290,9 @@ def test_rag_chain_ask_invokes_reranker_and_attaches_score():
 
 def test_normalize_reranker_model():
     from app.rag.reranker import (
+        DEFAULT_COHERE_MODEL,
         DEFAULT_FLASHRANK_MODEL,
         DEFAULT_MULTILINGUAL_FLASHRANK_MODEL,
-        DEFAULT_COHERE_MODEL,
         normalize_reranker_model,
     )
 

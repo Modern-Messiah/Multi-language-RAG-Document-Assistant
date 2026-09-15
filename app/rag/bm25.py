@@ -9,11 +9,11 @@ This module provides a zero-external-dependency, thread-safe BM25Okapi
 implementation optimized for multilingual (Russian, English, numerical) texts.
 """
 
-from collections import Counter
 import logging
 import math
 import re
 import threading
+from collections import Counter
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from langchain_core.documents import Document
