@@ -286,3 +286,19 @@ def test_rag_chain_ask_invokes_reranker_and_attaches_score():
     assert answer["sources"][0]["source"] == "doc_7.txt"
     assert "rerank_score" in answer["sources"][0]
     assert answer["sources"][0]["rerank_score"] == 0.99
+
+
+def test_normalize_reranker_model():
+    from app.rag.reranker import (
+        DEFAULT_FLASHRANK_MODEL,
+        DEFAULT_MULTILINGUAL_FLASHRANK_MODEL,
+        DEFAULT_COHERE_MODEL,
+        normalize_reranker_model,
+    )
+
+    assert normalize_reranker_model("flashrank", "multilingual") == DEFAULT_MULTILINGUAL_FLASHRANK_MODEL
+    assert normalize_reranker_model("flashrank", "bge-m3") == DEFAULT_MULTILINGUAL_FLASHRANK_MODEL
+    assert normalize_reranker_model("flashrank", "tiny") == DEFAULT_FLASHRANK_MODEL
+    assert normalize_reranker_model("flashrank", "custom-model") == "custom-model"
+    assert normalize_reranker_model("cohere", "multilingual") == DEFAULT_COHERE_MODEL
+    assert normalize_reranker_model("cohere", "") == ""

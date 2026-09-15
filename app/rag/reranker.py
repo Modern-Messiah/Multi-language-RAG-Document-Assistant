@@ -26,8 +26,29 @@ from langchain_core.documents import Document
 logger = logging.getLogger(__name__)
 
 DEFAULT_FLASHRANK_MODEL = "ms-marco-TinyBERT-L-2-v2"
+DEFAULT_MULTILINGUAL_FLASHRANK_MODEL = "ms-marco-MultiBERT-L-12"
 DEFAULT_COHERE_MODEL = "rerank-v3.5"
+DEFAULT_MULTILINGUAL_COHERE_MODEL = "rerank-v3.5"
 COHERE_RERANK_URL = "https://api.cohere.com/v2/rerank"
+
+
+def normalize_reranker_model(provider: str, model_name: Optional[str]) -> str:
+    """Normalize user-supplied reranker model names and aliases."""
+    if not model_name:
+        return ""
+    m = model_name.strip()
+    p = (provider or "").strip().lower()
+    if p == "flashrank":
+        low = m.lower()
+        if low in ("multilingual", "multi", "ms-marco-multi-bert-l-12", "multibert", "bge", "bge-m3"):
+            return DEFAULT_MULTILINGUAL_FLASHRANK_MODEL
+        if low in ("default", "tiny", "tinybert"):
+            return DEFAULT_FLASHRANK_MODEL
+    elif p == "cohere":
+        low = m.lower()
+        if low in ("multilingual", "default", "v3.5"):
+            return DEFAULT_COHERE_MODEL
+    return m
 
 
 _RANKER_CACHE: Dict[str, Any] = {}
@@ -63,7 +84,8 @@ class FlashRankReranker(BaseReranker):
     """Local, high-speed ONNX cross-encoder using FlashRank."""
 
     def __init__(self, model_name: Optional[str] = None):
-        self.model_name = model_name or DEFAULT_FLASHRANK_MODEL
+        normalized = normalize_reranker_model("flashrank", model_name)
+        self.model_name = normalized or DEFAULT_FLASHRANK_MODEL
         self._ranker = None
         self._init_error = None
 
@@ -225,12 +247,14 @@ def get_reranker(
         return NoOpReranker()
 
     if provider == "flashrank":
-        model = model_override or getattr(settings, "reranker_model", "")
+        raw_model = model_override or getattr(settings, "reranker_model", "")
+        model = normalize_reranker_model("flashrank", raw_model)
         return FlashRankReranker(model_name=model or None)
 
     if provider == "cohere":
         api_key = api_key_override or getattr(settings, "reranker_api_key", "")
-        model = model_override or getattr(settings, "reranker_model", "")
+        raw_model = model_override or getattr(settings, "reranker_model", "")
+        model = normalize_reranker_model("cohere", raw_model)
         return CohereReranker(api_key=api_key, model=model or None)
 
     return NoOpReranker()
