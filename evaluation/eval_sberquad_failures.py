@@ -6,16 +6,18 @@ and multilingual Cross-Encoder reranker.
 """
 
 import argparse
-import json
 import os
 import re
-import sys
 import time
 from typing import List, Optional
+
 import requests
 from dotenv import load_dotenv
 
-from evaluation.langfuse_eval import get_corpus_and_expectations, hit_at_k, precision_at_k, recall_at_k
+from evaluation.langfuse_eval import (
+    get_corpus_and_expectations,
+    hit_at_k,
+)
 
 
 def extract_failed_indices(log_path: str, max_items: int = 5166) -> List[int]:
@@ -67,13 +69,13 @@ def run_hard_cases_benchmark(
         if reranker_model:
             headers["X-Reranker-Model"] = reranker_model
 
-    print(f"\n=======================================================", flush=True)
-    print(f"🚀 SberQuAD Hard Failures Recovery Benchmark", flush=True)
+    print("\n=======================================================", flush=True)
+    print("🚀 SberQuAD Hard Failures Recovery Benchmark", flush=True)
     print(f"  Target Cases    : {len(selected_indices)} (previously 100% failed in baseline)", flush=True)
     print(f"  Tenant ID       : {tenant_id}", flush=True)
-    print(f"  Pipeline        : Hybrid Search (ChromaDB + Okapi BM25 + RRF)", flush=True)
+    print("  Pipeline        : Hybrid Search (ChromaDB + Okapi BM25 + RRF)", flush=True)
     print(f"  Reranker        : {reranker or 'None'} (model={reranker_model or 'default'})", flush=True)
-    print(f"=======================================================\n", flush=True)
+    print("=======================================================\n", flush=True)
 
     recovered_at_3 = 0
     recovered_at_5 = 0
@@ -83,7 +85,6 @@ def run_hard_cases_benchmark(
         item = items[idx - 1]
         expected_sources = item_expectations[idx - 1]
         question = item.input.get("question")
-        gold_answer = (item.expected_output or {}).get("answer", "")
 
         t0 = time.perf_counter()
         try:
@@ -102,7 +103,6 @@ def run_hard_cases_benchmark(
         latencies.append(latency_ms)
 
         retrieved_sources = [s["source"] for s in data.get("sources", [])]
-        answer_text = data.get("answer", "")
 
         hit3 = hit_at_k(expected_sources, retrieved_sources, 3)
         hit5 = hit_at_k(expected_sources, retrieved_sources, 5)
@@ -128,7 +128,7 @@ def run_hard_cases_benchmark(
     print("\n=======================================================", flush=True)
     print("🎯 Benchmark Summary on Hard Failure Subset:", flush=True)
     print(f"  Cases Evaluated    : {len(selected_indices)}", flush=True)
-    print(f"  Baseline Hit Rate  : 0.0% (all were failures)", flush=True)
+    print("  Baseline Hit Rate  : 0.0% (all were failures)", flush=True)
     print(f"  New Hit Rate@3     : {recovered_at_3}/{len(selected_indices)} ({recovered_at_3/len(selected_indices)*100:.1f}%)", flush=True)
     print(f"  New Hit Rate@5     : {recovered_at_5}/{len(selected_indices)} ({recovered_at_5/len(selected_indices)*100:.1f}%)", flush=True)
     if latencies:

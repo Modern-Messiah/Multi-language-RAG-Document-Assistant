@@ -11,8 +11,8 @@ high in both) are boosted effectively into the top candidate pool before
 cross-encoder reranking.
 """
 
-from collections import defaultdict
 import logging
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_core.documents import Document
