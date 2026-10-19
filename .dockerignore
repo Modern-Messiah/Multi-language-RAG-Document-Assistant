@@ -10,6 +10,9 @@ __pycache__/
 tests/
 evaluation/
 *.md
+# Agent skills and their references: guidance for coding agents, never read at
+# runtime (*.md above only matches files in the build-context root).
+.claude/
 # 4.3 MB of README demo GIFs that the running services never read
 app/docs/assets/
 data/chroma_db/*
